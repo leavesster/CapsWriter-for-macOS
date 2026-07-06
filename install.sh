@@ -21,6 +21,20 @@ if [[ "$(uname -m)" != "arm64" ]]; then
     exit 1
 fi
 
+echo "=== 准备 MLX 推理子仓库 ==="
+if [[ ! -f "$PROJECT_DIR/mlx-qwen3-asr/pyproject.toml" ]]; then
+    if [[ -f "$PROJECT_DIR/.gitmodules" ]] && command -v git >/dev/null 2>&1; then
+        # mlx-qwen3-asr 是本项目推理调优入口，安装依赖前必须确保 submodule 已拉取。
+        git -C "$PROJECT_DIR" submodule update --init --recursive -- mlx-qwen3-asr
+    fi
+fi
+
+if [[ ! -f "$PROJECT_DIR/mlx-qwen3-asr/pyproject.toml" ]]; then
+    echo "错误：未找到 mlx-qwen3-asr 子仓库。" >&2
+    echo "请执行：git submodule update --init --recursive mlx-qwen3-asr" >&2
+    exit 1
+fi
+
 echo "=== 准备 Python 虚拟环境 ==="
 if [[ ! -x "$VENV_PYTHON" ]]; then
     if ! command -v uv >/dev/null 2>&1; then

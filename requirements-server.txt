@@ -3,7 +3,7 @@ sherpa-onnx
 numpy
 gguf
 onnxruntime-directml; platform_system == "Windows"
-mlx-qwen3-asr>=0.3.5; platform_system == "Darwin"
+mlx-qwen3-asr @ file:./mlx-qwen3-asr ; platform_system == "Darwin"
 
 # basic
 rich
