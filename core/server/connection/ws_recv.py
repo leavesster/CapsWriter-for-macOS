@@ -12,7 +12,7 @@ from base64 import b64decode
 import websockets
 
 from ..state import console
-from ..schema import Task
+from ..schema import Work
 from core.protocol import AudioMessage
 from core.constants import AudioFormat
 from core.tools.my_status import Status
@@ -29,7 +29,7 @@ def _use_qwen_mlx_runner_path() -> bool:
     判断当前服务端是否应启用 Qwen3-ASR Runner 喂音频路径。
 
     只有 `qwen_asr_mlx` 走这条分叉；其它后端继续使用旧的 60 秒分段 + overlap +
-    TaskPipeline 拼接机制，避免为了 macOS MLX 调优影响 Windows / GGUF 稳定基线。
+    WorkPipeline 拼接机制，避免为了 macOS MLX 调优影响 Windows / GGUF 稳定基线。
     """
     return Config.model_type.lower() == 'qwen_asr_mlx'
 
@@ -113,7 +113,7 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
                 segment_data = cache.chunks[:segment_bytes]
                 cache.chunks = cache.chunks[stride_bytes:]
 
-                task = Task(
+                work = Work(
                     source=msg.source,
                     data=segment_data,
                     offset=cache.offset,
@@ -127,9 +127,9 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
                     language=msg.language,
                 )
                 cache.offset += msg.seg_duration
-                queue_in.put(task)
+                queue_in.put(work)
                 logger.debug(
-                    f"提交音频片段，任务ID: {msg.task_id}, "
+                    f"提交音频工作单元，任务ID: {msg.task_id}, "
                     f"偏移: {cache.offset}s, 缓冲区: {len(cache.chunks)} bytes"
                 )
 
@@ -142,7 +142,7 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
                 logger.info(f"音频文件接收完毕，任务ID: {msg.task_id}, 时长: {cache.total_duration:.2f}s")
 
             # 提交最终片段
-            task = Task(
+            work = Work(
                 source=msg.source,
                 data=cache.chunks,
                 offset=cache.offset,
@@ -155,8 +155,8 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
                 context=msg.context,
                 language=msg.language,
             )
-            queue_in.put(task)
-            logger.debug(f"提交最终片段，任务ID: {msg.task_id}, 数据大小: {len(cache.chunks)} bytes")
+            queue_in.put(work)
+            logger.debug(f"提交最终工作单元，任务ID: {msg.task_id}, 数据大小: {len(cache.chunks)} bytes")
 
             # 重置缓冲区
             cache.reset()
@@ -193,7 +193,7 @@ async def _submit_qwen_mlx_runner_patch(
 
         offset = cache.total_duration
         cache.byte_count += len(data)
-        task = Task(
+        work = Work(
             source=msg.source,
             data=data,
             offset=offset,
@@ -206,7 +206,7 @@ async def _submit_qwen_mlx_runner_patch(
             context=msg.context,
             language=msg.language,
         )
-        queue_in.put(task)
+        queue_in.put(work)
         logger.debug(
             f"提交 Qwen MLX Runner 音频增量，任务ID: {msg.task_id}, "
             f"offset={offset:.2f}s, bytes={len(data)}"
@@ -221,7 +221,7 @@ async def _submit_qwen_mlx_runner_patch(
 
     offset = cache.total_duration
     cache.byte_count += len(data)
-    task = Task(
+    work = Work(
         source=msg.source,
         data=data,
         offset=offset,
@@ -234,7 +234,7 @@ async def _submit_qwen_mlx_runner_patch(
         context=msg.context,
         language=msg.language,
     )
-    queue_in.put(task)
+    queue_in.put(work)
     logger.debug(
         f"提交 Qwen MLX Runner final，任务ID: {msg.task_id}, "
         f"总时长={cache.total_duration:.2f}s, final_bytes={len(data)}"
@@ -298,6 +298,6 @@ async def ws_recv(websocket, app) -> None:
 
         console.print(f'[bold red]客户端已断开: {remote[0]}:{remote[1]}[/bold red]\n')
 
-        # 注意：session 清理由 TaskHandler 在子进程中定期执行
+        # 注意：session 清理由 WorkHandler 在子进程中定期执行
         # （通过检查 sockets_id 判断客户端是否已断开）
         logger.debug(f"客户端资源已清理: {socket_id}")

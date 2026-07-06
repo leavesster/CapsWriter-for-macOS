@@ -3,7 +3,7 @@
 Qwen3-ASR MLX Runner 处理管线
 
 这条管线只服务 `qwen_asr_mlx` 后端：Server Worker 不再把音频按 60 秒
-语义分片交给旧 TaskPipeline 拼接，而是把同一个 task_id 的音频增量持续喂给
+语义分片交给旧 WorkPipeline 拼接，而是把同一个 task_id 的音频增量持续喂给
 package 内的 QwenASRRunner。final 到达后，Runner 返回完整结果，再进入
 CapsWriter 的最终格式化与发送流程。
 """
@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 
 from core.server.formatter import TextFormatter
-from core.server.schema import Result, Task
+from core.server.schema import Result, Work
 from core.server.state import WorkerState, console
 from core.tools.token_sync import sync_tokens_from_text
 from . import logger
@@ -32,32 +32,32 @@ class QwenMLXRunnerPipeline:
         self.formatter = TextFormatter(punc_model)
         self.state = state or WorkerState()
 
-    def process(self, task: Task) -> Optional[Result]:
+    def process(self, work: Work) -> Optional[Result]:
         """
         处理一个音频增量。
 
         非 final 增量只进入 Runner 缓冲，不向主进程返回识别消息；final 增量触发
         Runner 完成该 task_id 的完整离线结果，并返回 CapsWriter Result。
         """
-        session = self.state.get_session(task.task_id, task.socket_id, task.source)
+        session = self.state.get_session(work.task_id, work.socket_id, work.source)
         result = session.result
-        result.time_start = task.time_start
-        result.time_submit = task.time_submit
+        result.time_start = work.time_start
+        result.time_submit = work.time_submit
 
-        samples = np.frombuffer(task.data, dtype=np.float32)
+        samples = np.frombuffer(work.data, dtype=np.float32)
         logger.debug(
-            f"Qwen MLX Runner 收到音频增量: task={task.task_id[:8]}, "
-            f"samples={len(samples)}, final={task.is_final}, source={task.source}"
+            f"Qwen MLX Runner 收到音频增量: task={work.task_id[:8]}, "
+            f"samples={len(samples)}, final={work.is_final}, source={work.source}"
         )
 
         runner_result = self.recognizer.feed_audio_patch(
-            task_id=task.task_id,
+            task_id=work.task_id,
             audio=samples,
-            sample_rate=task.samplerate,
-            is_final=task.is_final,
-            context=task.context,
-            language=task.language,
-            source=task.source,
+            sample_rate=work.samplerate,
+            is_final=work.is_final,
+            context=work.context,
+            language=work.language,
+            source=work.source,
         )
         if runner_result is None:
             return None
@@ -75,10 +75,10 @@ class QwenMLXRunnerPipeline:
 
         console.print(f'  Qwen Runner 输出：[cyan]{raw_text}', soft_wrap=True)
         console.print(f'  格式化后：[green]{result.text}\n', soft_wrap=True)
-        process_time = result.time_complete - task.time_submit
+        process_time = result.time_complete - work.time_submit
         rtf = process_time / result.duration if result.duration > 0 else 0
         logger.info(
-            f"任务完成: {task.task_id[:8]}, 引擎=qwen_asr_mlx_runner, "
+            f"工作单元完成: {work.task_id[:8]}, 引擎=qwen_asr_mlx_runner, "
             f"时长={result.duration:.2f}s, 耗时={process_time:.3f}s, RTF={rtf:.3f}, "
             f"finish_reason={runner_result.finish_reason}, truncated={runner_result.truncated}"
         )

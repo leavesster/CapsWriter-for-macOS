@@ -58,7 +58,7 @@ class QwenASRMLXStream(RecognitionStream):
         """
         接收一段音频。
 
-        这里统一转成 float32 numpy，避免把上游库依赖泄露到 TaskPipeline。
+        这里统一转成 float32 numpy，避免把上游库依赖泄露到 WorkPipeline。
         采样率是否需要重采样放到 decode 阶段统一处理，这样可以把“输入标准化”和
         “模型目标采样率适配”两件事分开，后续排查也更直观。
         """
@@ -313,7 +313,7 @@ class QwenASRMLXEngine(BaseASREngine):
         """
         将上游 segments 起始时间抽取为时间戳列表。
 
-        TaskPipeline 的 token 合并逻辑只要求 token/timestamp 对齐即可，
+        WorkPipeline 的 token 合并逻辑只要求 token/timestamp 对齐即可，
         因此首版使用 segment 起始时间作为每个 token 的代表时间。
         """
         timestamps: List[float] = []

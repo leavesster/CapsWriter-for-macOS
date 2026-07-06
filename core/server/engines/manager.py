@@ -8,7 +8,7 @@ class ManagedAlignerProxy(BaseAlignEngine):
     对齐引擎托管代理
     
     实现“懒加载”与“闲置卸载”逻辑。
-    由于 TaskHandler 是单线程同步的，此处无需线程锁。
+    由于 WorkHandler 是单线程同步的，此处无需线程锁。
     """
 
     def __init__(self, timeout_sec=600):

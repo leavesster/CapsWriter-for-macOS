@@ -44,14 +44,14 @@
 原因：
 
 - 真实产品路径是客户端为一次录音或一次文件转写生成一个 `task_id`，并持续发送带有同一 `task_id` 的 `AudioMessage`。
-- 当前旧服务端路径会把同一个 `task_id` 下的连续音频切成多个代码层 `Task` 对象，再由 `TaskPipeline` 调用 `QwenASRMLXEngine`，最后进入 `mlx-qwen3-asr`。
+- 当前旧服务端路径会把同一个 `task_id` 下的连续音频切成多个代码层 `Work` 对象，再由 `WorkPipeline` 调用 `QwenASRMLXEngine`，最后进入 `mlx-qwen3-asr`。
 - 如果评测绕过 `QwenASRMLXEngine`，就会漏掉 CapsWriter 当前实际使用的语言映射、context 透传、音频采样率整理、结果格式化和性能元数据。
 - 调优目标是改善 CapsWriter 的实际输入体验，不是单独评估上游库裸 API。
 
 第一轮评测驱动应优先做到：
 
-- 在 runner 重构落地前，读取 manifest 音频后可构造与旧服务端一致的 `Task` 作为临时基线。
-- 在 Qwen3-ASR runner 落地后，评测主路径必须以同一个 `task_id` 调用 package runner，而不是绕回旧服务端 `Task` 分片。
+- 在 runner 重构落地前，读取 manifest 音频后可构造与旧服务端一致的 `Work` 作为临时基线。
+- 在 Qwen3-ASR runner 落地后，评测主路径必须以同一个 `task_id` 调用 package runner，而不是绕回旧服务端 `Work` 分片。
 - 保存 raw ASR 输出、最终格式化输出、耗时、RTF、`finish_reason`、`truncated`、语言配置、context 配置和模型路径。
 
 首轮不强制走 GUI、WebSocket 或真实麦克风录音链路。这样可以避免把客户端权限、网络连接、前台窗口和快捷键问题混入 ASR 质量评估。
@@ -92,14 +92,14 @@
 2. 服务端 WebSocket 接收与产品级分段
 
 - `AudioMessage` 携带 `seg_duration` 和 `seg_overlap`，当前默认麦克风和文件都是 60 秒分段、4 秒重叠。
-- 服务端 `ws_recv` 按 `seg_duration + seg_overlap * 2` 作为提交阈值，达到阈值后提交一个 `seg_duration + seg_overlap` 长度的 `Task`，再按 `seg_duration` 前进。
+- 服务端 `ws_recv` 按 `seg_duration + seg_overlap * 2` 作为提交阈值，达到阈值后提交一个 `seg_duration + seg_overlap` 长度的 `Work`，再按 `seg_duration` 前进。
 - 因此当前典型片段是 64 秒音频，步长 60 秒，片段之间有 4 秒重叠。
 - 录音或文件结束时，服务端把剩余缓存作为最终片段提交。
 
 3. 服务端任务处理与结果拼接
 
-- `process_audio_task()` 只把当前代码中的 `Task.data` 从 bytes 转成 `np.float32`，并统计时长；不做 AGC、响度归一化、降噪或 EQ。
-- `TaskPipeline` 为每个片段创建 `RecognitionStream`，调用 `QwenASRMLXEngine.decode_stream()`。
+- `process_audio_work()` 只把当前代码中的 `Work.data` 从 bytes 转成 `np.float32`，并统计时长；不做 AGC、响度归一化、降噪或 EQ。
+- `WorkPipeline` 为每个片段创建 `RecognitionStream`，调用 `QwenASRMLXEngine.decode_stream()`。
 - 每个片段的 raw 文本由 `merge_by_text()` 跨片段拼接。
 - 如果有 token/timestamp，则用 `merge_tokens_by_sequence_matcher()` 做时间戳路径拼接。
 - 最终阶段再走 `TextFormatter` 格式化。
@@ -109,9 +109,9 @@
 - package 可以直接接收 `np.ndarray` 或 `(np.ndarray, sample_rate)`，会转换为 16kHz mono float32。
 - package 内部还有自己的长音频分段：`split_audio_into_chunks()` 默认把超过 30 秒的音频按低能量点递归切成更短 chunk。
 - 因此当前 CapsWriter 的一个 64 秒服务端片段，进入 package 后还会被 package 再切成约 30 秒级别的内部 chunk。
-- package 内部会把这些内部 chunk 的文本合并为单个片段结果，然后交回 CapsWriter 的 `TaskPipeline` 做产品级跨片段拼接。
+- package 内部会把这些内部 chunk 的文本合并为单个片段结果，然后交回 CapsWriter 的 `WorkPipeline` 做产品级跨片段拼接。
 
-### `task_id` 与旧 `Task` 语义收敛
+### `task_id` 与 `Work` 语义收敛
 
 当前代码里的命名存在一处历史混用，需要在 Qwen3-ASR 重构前先明确。
 
@@ -120,23 +120,22 @@
 - `AudioMessage.task_id` 是客户端一次按键录音或一次文件转写生成的稳定 ID。
 - 同一个完整音频任务在客户端到服务端的传输过程中，会产生多个 `AudioMessage`，但它们共享同一个 `task_id`。
 - `WorkerState.sessions` 以 `task_id` 为键保存 `RecognitionSession`，说明 worker 侧也把 `task_id` 当作完整识别会话标识。
-- 当前大写 `Task` 类不是完整任务，而是旧服务端按 60 秒分段、4 秒 overlap 切出来的 worker 执行单元。
-- 因此当前旧链路实际结构是：一个 `task_id` / 一个完整识别任务 / 一个 `RecognitionSession`，下面可以有多个代码层 `Task` 分片。
+- 当前代码中的 `Work` 类不是完整任务，而是旧服务端按 60 秒分段、4 秒 overlap 切出来的 worker 执行单元。
+- 因此当前旧链路实际结构是：一个 `task_id` / 一个完整识别任务 / 一个 `RecognitionSession`，下面可以有多个代码层 `Work` 分片。
 
 后续统一口径：
 
 - `task_id` 就是完整识别任务标识，也等价于当前讨论中的 record session / recognition session 标识。
 - 不再额外引入 `RecordSession` 作为新的业务层级，避免把同一层含义拆成两个名字。
-- 旧代码中的大写 `Task` 语义应重构为 `Work` 或 `RecognitionWork`，表示 worker 执行工作单元。
 - 旧后端仍可在一个 `task_id` 下产生多个 `Work`，以保留现有 60 秒分段、4 秒 overlap、跨片段拼接能力。
-- Qwen3-ASR 新路径不再使用旧 `Task` / `Work` 表达 ASR 语义切片；一个 `task_id` 对应一个 package runner 生命周期。
+- Qwen3-ASR 新路径不再使用旧 `Work` 表达 ASR 语义切片；一个 `task_id` 对应一个 package runner 生命周期。
 - Qwen3-ASR runner 内部约 30 秒级别、真正送入模型的单位命名为 `InferenceChunk`，由 runner 自己负责切分、推理和拼接。
 
 命名层级固定如下：
 
 - `AudioMessage`：客户端到服务端的 WebSocket 协议消息，包含 `task_id`、音频数据、`is_final`、语言和 context 等字段。
 - `task_id`：一次完整录音或一次文件转写的唯一标识；它就是完整识别任务标识，也就是 record session / recognition session 标识。
-- `Work` / `RecognitionWork`：旧后端的 worker 执行单元；当前代码名仍是大写 `Task`，后续应重命名以避免和 `task_id` 混淆。
+- `Work` / `RecognitionWork`：旧后端的 worker 执行单元；当前主代码已经改用 `Work` 命名，避免和 `task_id` 混淆。
 - `AudioFeedPatch`：Qwen3-ASR 新路径中，server/worker 按时间顺序喂给 `QwenASRMLXEngine` / package runner 的内部音频增量。它不是 WebSocket 包，也不是推理 chunk；它只表达同一个 `task_id` 下新增的一小段连续音频、时间顺序信息、offset 或 sample 游标、以及 final 标记。
 - `InferenceChunk`：package runner 内部拼到稳定边界后，真正送入 Qwen3-ASR 模型推理的约 30 秒级单位。
 - `QwenASRRunner`：editable package 内 CapsWriter 专用 runner，负责按 `task_id` 管理音频缓冲、`AudioFeedPatch` 拼接、`InferenceChunk` 切分、推理、结果拼接、`finish_reason` / `truncated` 等元数据收集，并在 final 后返回该 `task_id` 对应的完整结果。实现时优先复用 package 现有的 `split_audio_into_chunks()`、内部 transcribe 编排和结果拼接逻辑，不在 server 侧重写这些策略。
@@ -146,7 +145,7 @@
 ```text
 AudioMessage(task_id, data, is_final, ...)
   └─ task_id = 完整识别任务 / recognition session
-       ├─ 旧后端：多个 Work（当前代码名为 Task，后续应重命名）
+       ├─ 旧后端：多个 Work
        └─ Qwen3-ASR：多个 AudioFeedPatch（按时序 feed）
             └─ QwenASRRunner
                  └─ 多个 InferenceChunk
@@ -167,7 +166,7 @@ AudioMessage(task_id, data, is_final, ...)
 合理目标应改为：
 
 - editable package 内提供 CapsWriter 专用推理实例或 runner，集中持有所有推理参数和推理策略。
-- 当 server 配置 `qwen_asr_mlx` 后端时，链路在服务端识别调度处按后端分叉：不再走旧 `Work` 切分和旧 `TaskPipeline` 跨片段拼接，而是把同一个 `task_id` 下的 `AudioFeedPatch` 按时序 feed 给 package runner。
+- 当 server 配置 `qwen_asr_mlx` 后端时，链路在服务端识别调度处按后端分叉：不再走旧 `Work` 切分和旧 `WorkPipeline` 跨片段拼接，而是把同一个 `task_id` 下的 `AudioFeedPatch` 按时序 feed 给 package runner。
 - CapsWriter server 调用这个 package runner，不在外层改写推理参数，也不负责推理级切分和结果拼接。
 - 评测 driver 也调用同一个 package runner。
 - 对于短音频评测，driver 可以直接把 16kHz mono float32 或 `(audio, sample_rate)` 传给 runner。
@@ -200,7 +199,7 @@ AudioMessage(task_id, data, is_final, ...)
 
 2. package-owned 流式喂音频 + 离线最终结果。
    - Server 仍然按时间顺序把音频增量送入 worker/package；进入 Qwen3-ASR runner 前的内部增量统一命名为 `AudioFeedPatch`。
-   - `AudioFeedPatch` 只作为 I/O 增量数据，不作为 ASR 语义片段，不触发旧 `TaskPipeline` 的跨片段拼接逻辑。
+   - `AudioFeedPatch` 只作为 I/O 增量数据，不作为 ASR 语义片段，不触发旧 `WorkPipeline` 的跨片段拼接逻辑。
    - Server 和 runner 之间可以是流式音频传输；这只是“喂音频”的流式，不是 ASR streaming 输出。
    - runner 维护同一次录音任务的音频缓冲和内部处理游标。
    - runner 自己决定哪些内部 chunk 已经稳定、可以提前推理。例如录音达到约 30 秒后，runner 就可以开始处理第一段稳定 chunk，而不必等到 Server 原来的 68 秒阈值。
@@ -218,8 +217,8 @@ AudioMessage(task_id, data, is_final, ...)
 
 实现边界补充：
 
-- 其它 ASR 后端继续保留当前 Server 架构：客户端持续发音频，Server 按 60 秒分段、4 秒 overlap 提交多个当前代码名为 `Task` 的执行单元，后续该类应重命名为 `Work` / `RecognitionWork`，再由 `TaskPipeline` 拼接。
-- `qwen_asr_mlx` 单独新增代码路径：Server 不再把中间传输包转换成多个 ASR 语义片段，也不再通过旧 `TaskPipeline` 进行片段推理和拼接；中间音频增量转换为 `AudioFeedPatch`，持续喂给 package runner 的同一个 `task_id` 生命周期。
+- 其它 ASR 后端继续保留当前 Server 架构：客户端持续发音频，Server 按 60 秒分段、4 秒 overlap 提交多个 `Work` 执行单元，再由 `WorkPipeline` 拼接。
+- `qwen_asr_mlx` 单独新增代码路径：Server 不再把中间传输包转换成多个 ASR 语义片段，也不再通过旧 `WorkPipeline` 进行片段推理和拼接；中间音频增量转换为 `AudioFeedPatch`，持续喂给 package runner 的同一个 `task_id` 生命周期。
 - 对 `qwen_asr_mlx` 来说，客户端一次按键录音或一次文件转录就是一个完整 ASR 任务；这个完整任务可由多个传输分包组成，但只有 runner 可以决定推理级切段和提前计算时机。
 - 这条路径下，音频进入 `QwenASRMLXEngine` 后交给 package runner；正式推理、推理级切段、overlap、prompt、language、generation 和拼接全部由 runner 管理。
 - 这不是删除旧 Server 分片机制，而是按后端分叉：保留旧模型所需的 Server 分段，同时让 Qwen3-ASR 路线实现“完整任务进入 runner”的新口径。
@@ -238,10 +237,10 @@ CapsWriter 原有链路在推理前已经做了一些非模型层优化。
 Server 侧：
 
 - `ws_recv` 边接收边缓存音频 bytes。
-- 对现有后端，Server 默认按 60 秒分段、4 秒 overlap 形成代码层 `Task`；按新语义它应重命名为 `Work` 或 `RecognitionWork`。
+- 对现有后端，Server 默认按 60 秒分段、4 秒 overlap 形成代码层 `Work`。
 - 实际提交阈值是 `seg_duration + seg_overlap * 2`，默认约 68 秒；提交片段长度是 `seg_duration + seg_overlap`，默认约 64 秒；步长 60 秒。
 - 因此长录音或长文件可以在接收过程中逐段进入 worker 推理。
-- `TaskPipeline` 负责跨片段文本拼接、可选 token/timestamp 拼接和最终格式化。
+- `WorkPipeline` 负责跨片段文本拼接、可选 token/timestamp 拼接和最终格式化。
 
 速度影响判断：
 
@@ -394,9 +393,9 @@ Server 侧：
 在建立正式评测结果之前，必须先完成后端接入基线：
 
 - ✅ 2026-07-06 已确认 macOS 服务端实际导入根目录 `mlx-qwen3-asr` 子仓库源码包，实测路径为 `/Users/edgar/programs/CapsWriter-Offline/mlx-qwen3-asr/mlx_qwen3_asr/__init__.py`。
-- ✅ 2026-07-06 已确认 `qwen_asr_mlx` 仍通过 CapsWriter 的 `QwenASRMLXEngine` 进入 worker 进程，但主路径已不再走旧 `TaskPipeline` 分片推理和拼接。
+- ✅ 2026-07-06 已确认 `qwen_asr_mlx` 仍通过 CapsWriter 的 `QwenASRMLXEngine` 进入 worker 进程，但主路径已不再走旧 `WorkPipeline` 分片推理和拼接。
 - ✅ 2026-07-06 runner 已落地，`qwen_asr_mlx` 主路径以 `AudioFeedPatch` 按时序 feed 同一个 `task_id` 的 package runner；当前 P0 先实现“流式喂音频 + final 离线完整结果”，尚未实现录音过程中提前处理稳定 `InferenceChunk`。
-- 明确 `task_id` 是完整识别任务标识；旧代码大写 `Task` 是待重命名的 worker 执行单元，不再作为完整任务语义使用。
+- ✅ 已完成语义收敛：`task_id` 是完整识别任务标识；服务端 worker 执行单元已经统一改名为 `Work`，不再复用 `Task` 表达完整任务语义。
 - ✅ 已把当前 `return_timestamps`、`return_chunks`、`max_new_tokens`、`num_draft_tokens`、`verbose` 等推理级入口集中到 `mlx-qwen3-asr` 包内 `CapsWriterRunnerConfig`，避免 CapsWriter 外层和包内两套配置同时生效。
 - ✅ 2026-07-06 已把启动预热和 MLX wired memory 落到 package Runner 内：server 默认开启 `enable_startup_prewarm`、`enable_wired_memory`，并以 `wired_memory_limit='auto'` 透传运行意图；Runner 负责预热、读取 active memory、计算 wired limit、调用 `mx.set_wired_limit()` 和记录初始化结果。
 - 保留 CapsWriter 外层的最小产品配置入口，避免破坏多后端工厂结构。
@@ -476,5 +475,5 @@ Server 侧：
 5. 写入数据源清单和 manifest 字段规范。
 6. 编写固定抽样脚本，先落地中文低语、中文技术、英文技术三类。
 7. 生成 `clean` 与 `low_gain` 样本。
-8. 在 `evals/drivers/` 中实现 CapsWriter 后端评测驱动：runner 落地前可构造旧 `Task` 作为临时基线；runner 落地后主路径必须以 `task_id` 调用同一个 package runner。
+8. 在 `evals/drivers/` 中实现 CapsWriter 后端评测驱动：可构造旧服务端风格的 `Work` 作为临时基线；runner 落地后主路径必须以 `task_id` 调用同一个 package runner。
 9. 产出第一份基线报告，回写 `CLAUDE.md` 当前阶段状态。

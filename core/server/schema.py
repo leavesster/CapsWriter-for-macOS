@@ -2,7 +2,7 @@
 """
 服务端数据类模块
 
-定义服务端使用的数据类，包括任务（Task）和结果（Result）。
+定义服务端使用的数据类，包括执行单元（Work）和结果（Result）。
 使用 dataclass 提供类型安全和清晰的数据结构。
 """
 
@@ -11,18 +11,20 @@ from typing import List, Optional
 
 
 @dataclass
-class Task:
+class Work:
     """
-    语音识别任务
-    
-    封装发送到识别进程的任务数据，包含音频数据和元信息。
+    语音识别执行单元
+
+    这里刻意不用 `Task` 命名，避免和跨 client/server 协议里的 `task_id`
+    混淆。`task_id` 表示一次完整录音或文件转写任务；`Work` 只表示 worker
+    进程当前要处理的一段音频工作单元。
     
     Attributes:
         source: 音频来源 ('mic' 或 'file')
         data: 原始音频数据 (float32, 16kHz, mono)
         offset: 当前片段在整段音频中的时间偏移（秒）
         overlap: 片段重叠时间（秒），用于去重
-        task_id: 任务唯一标识
+        task_id: 所属完整识别任务标识
         socket_id: WebSocket 连接标识
         is_final: 是否为音频流的最后一个片段
         time_start: 录音/音频开始时间戳

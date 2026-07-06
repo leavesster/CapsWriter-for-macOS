@@ -2,7 +2,7 @@
 """
 识别子进程 Worker 门面类
 
-采用门面模式将复杂的加载、信号、任务处理逻辑进行组合并统一导出。
+采用门面模式将复杂的加载、信号、工作单元处理逻辑进行组合并统一导出。
 该模块作为子进程运行的完整生命周期管理者。
 """
 
@@ -15,7 +15,7 @@ from multiprocessing.managers import ListProxy
 from platform import system
 
 from .model_loader import ModelLoader
-from .task_handler import TaskHandler
+from .work_handler import WorkHandler
 from ..state import WorkerState
 from . import logger
 
@@ -24,7 +24,7 @@ class RecognizerWorker:
     """
     识别进程工作者 (Facade)
     
-    统一调度模型加载器与任务处理器，负责识别进程的完整运行。
+    统一调度模型加载器与工作单元处理器，负责识别进程的完整运行。
     """
     def __init__(self, queue_in: Queue, queue_out: Queue, sockets_id: ListProxy, stdin_fn: int = None):
         # 1. 初始化核心状态
@@ -32,7 +32,7 @@ class RecognizerWorker:
         
         # 2. 初始化核心组件 (注入 state)
         self.loader = ModelLoader()
-        self.handler = TaskHandler(queue_in, queue_out, sockets_id, self.state)
+        self.handler = WorkHandler(queue_in, queue_out, sockets_id, self.state)
         
         # 3. 状态追踪
         self.stdin_fn = stdin_fn
@@ -89,7 +89,7 @@ class RecognizerWorker:
 
     def start(self):
         """
-        启动子进程任务循环
+        启动子进程工作单元循环
         """
         if self._is_running:return
         self._is_running = True
