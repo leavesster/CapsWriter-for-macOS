@@ -306,6 +306,19 @@ def _build_client_plist() -> str:
     <key>WorkingDirectory</key>
     <string>{cwd}</string>
 
+    <!--
+      显式注入 PATH：launchd 默认 PATH 是最小集（/usr/bin:/bin:/usr/sbin:/sbin），
+      不含 Homebrew 的 ffmpeg。AudioFileManager 靠 shutil.which('ffmpeg') 决定
+      存 MP3 还是 WAV，若 PATH 无 ffmpeg 会静默降级成体积大 5~6 倍的 WAV。
+      这里把 Homebrew 常见 bin 目录（Apple Silicon=/opt/homebrew，Intel=/usr/local）
+      放到 PATH 最前，其余保留系统最小集。
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
     <!-- 登录后自动启动 -->
     <key>RunAtLoad</key>
     <true/>
