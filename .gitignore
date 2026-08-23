@@ -226,3 +226,4 @@ evals/manual_cases/cases.jsonl
 # 例外：随代码入库的回归测试脚本
 tools/test_*.py
 !tools/test_stream_stop_leak.py
+.superpowers/
