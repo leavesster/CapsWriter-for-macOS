@@ -112,6 +112,25 @@ class CapsWriterClient:
             self.remap_session = MacOSCapsRemapSession()
             self.macos_caps_bridge = MacOSCapsF18Bridge(self)
 
+        # 编辑框标注功能（macOS）：标注服务 + 「标记上一条有问题」全局热键。
+        # 非 macOS 下 annotation 仍创建（纯文件写入，无害），热键仅 Darwin 注册。
+        # 热键回调在 pynput 监听线程执行；mark_last_problem 内部自带锁与异常兜底，
+        # 注册失败只 warning 不阻断启动（功能仍可从菜单栏使用）。
+        from core.client.output.annotation_store import AnnotationService
+        self.annotation = AnnotationService(self)
+        if system() == 'Darwin':
+            try:
+                from core.client.global_hotkey import get_global_hotkey_manager
+                _hm = get_global_hotkey_manager()
+                _hm.register(
+                    Config.mark_problem_hotkey,
+                    self.annotation.mark_last_problem,
+                )
+                _hm.start()
+                logger.info(f"已注册「标记上一条」全局热键: {Config.mark_problem_hotkey}")
+            except Exception as e:
+                logger.warning(f"注册标记热键失败（功能仍可从菜单栏使用）: {e}")
+
         # 编辑框模式运行时开关持久化：菜单切换写入 ~/.capswriter/state/editor-mode.json，
         # 启动时读回覆盖默认值，保证用户选择跨重启生效
         if system() == 'Darwin':

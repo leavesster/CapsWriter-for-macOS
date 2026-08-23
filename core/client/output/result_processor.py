@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from config_client import ClientConfig as Config
@@ -303,6 +305,57 @@ class ResultProcessor:
                 log_str = "; ".join([f"{origin}->{hw}({score:.2f})" for origin, hw, score in potential_matches])
                 logger.debug(f"潜在热词: {log_str}")
 
+        # ===== 编辑框模式（macOS）：结果先进编辑框，确认后再上屏/存标注 =====
+        # 仅拦截非 LLM 路径（LLM 有自己的输出管线）；面板不可用/已在显示时回退旧行为。
+        use_editor = (
+            sys.platform == 'darwin'
+            and getattr(Config, 'editor_mode', False)
+            and not Config.llm_enabled
+        )
+        file_path_pending = None
+        if Config.save_audio:
+            # 音频路径必须在此时弹出（无论走哪条输出路径），编辑框确认/取消回调里再重命名，
+            # 避免直接输出路径先把文件移走导致标注案例拿不到音频
+            file_path_pending = self.state.pop_audio_file(message.task_id)
+
+        if use_editor:
+            from core.client.output.edit_panel import present_editor
+            import datetime as _dt
+            # 录音时长：从 trace 上下文推（完成请求时刻 - 录音开始时刻），缺项则留空
+            recording_duration = None
+            if trace_context:
+                _fin = trace_context.get('finish_requested_time')
+                _beg = trace_context.get('recording_start_time')
+                if _fin is not None and _beg is not None:
+                    recording_duration = _fin - _beg
+            # case 公共字段：编辑确认/取消回调共用（回调里只能拿到 dict，拿不到 message）
+            case_common = {
+                'ts': _dt.datetime.now().isoformat(timespec='seconds'),
+                'task_id': message.task_id,
+                'time_start': message.time_start,
+                'raw_text': original_text,
+                'recording_duration': recording_duration,
+                'source_app': getattr(self.state, 'paste_target', None),
+                'audio_src': str(file_path_pending) if file_path_pending else None,
+            }
+            # 供「标记上一条有问题」使用（编辑确认后回填 final_text / audio_src）
+            self.state.editor_last_case = dict(case_common, mode='editor', marked=False)
+
+            def _on_confirm(final_text: str):
+                # 回调在主线程（AppKit）执行：把真正的工作派发回客户端事件循环
+                asyncio.run_coroutine_threadsafe(
+                    self._editor_confirmed(dict(case_common), final_text, file_path_pending),
+                    self.app.loop)
+
+            def _on_cancel():
+                asyncio.run_coroutine_threadsafe(
+                    self._editor_canceled(dict(case_common), file_path_pending),
+                    self.app.loop)
+
+            if present_editor(text, _on_confirm, _on_cancel):
+                return  # 上屏/改名/日记全部推迟到确认或取消回调
+            # 面板不可用/已占用：落回直接输出路径（下方继续，含 last_case 登记）
+
         # 窗口兼容性检测
         paste = Config.paste
         process_name = get_active_window_info().get('process_name', '').lower()
@@ -319,22 +372,10 @@ class ResultProcessor:
                 matched_hotwords=potential_hotwords  # 传递上下文热词给 LLM
             )
         else:
-            await self.output.output(text, paste=paste)
-            self.state.set_output_text(text)
-            broadcast_output_udp(text)
+            await self._emit_text(text, paste=paste)
 
-        # 保存录音与写入 md 文件
-        file_audio = None
-        if Config.save_audio:
-            # 重命名音频文件
-            file_path = self.state.pop_audio_file(message.task_id)
-            if file_path:
-                file_manager = AudioFileManager()
-                file_manager.file_path = file_path
-                file_audio = file_manager.rename(text, message.time_start)
-
-            # 写入日记
-            self.diary.write(text, message.time_start, file_audio)
+        # 保存录音与写入 md 文件（直接输出路径；编辑框路径在回调里做同样的事）
+        file_audio = self._save_audio_and_diary(text, message.time_start, file_path_pending)
 
         # LLM 结果显示和保存
         if Config.llm_enabled and llm_result and llm_result.processed:
@@ -347,11 +388,94 @@ class ResultProcessor:
                 file_audio
             )
 
+        # 直接输出路径也登记 last_case，供「标记上一条有问题」热键/菜单使用。
+        # （编辑框路径在上方进入分支后已 return，不会走到这里；LLM 路径有自己的管线，不登记）
+        if not Config.llm_enabled:
+            import datetime as _dt0
+            self.state.editor_last_case = {
+                'ts': _dt0.datetime.now().isoformat(timespec='seconds'),
+                'task_id': message.task_id,
+                'time_start': message.time_start,
+                'raw_text': original_text,
+                'final_text': text,
+                # 音频此时已按最终文本重命名归档，直接指向归档路径（标记时再拷贝）
+                'audio_src': str(file_audio) if file_audio else None,
+                'source_app': getattr(self.state, 'paste_target', None),
+                'mode': 'direct', 'marked': False,
+            }
+
         # 检测修饰键状态（调试用）
         self._log_modifier_key_state()
 
         console.line()
-    
+
+    async def _emit_text(self, text: str, paste: Optional[bool] = None) -> None:
+        """统一输出出口（直接输出与编辑框确认两路共用）：上屏 + 记录输出文本 + UDP 广播。"""
+        await self.output.output(text, paste=paste)
+        self.state.set_output_text(text)
+        broadcast_output_udp(text)
+
+    def _save_audio_and_diary(
+        self, text: str, time_start: float, file_path_pending
+    ) -> Optional[Path]:
+        """保存录音与写日记（直接输出 / 编辑框确认 / 编辑框取消三路共用）。
+
+        录音文件在 _handle_message 开头就已从 state 弹出到 file_path_pending，
+        这里按各路径自己的最终文本重命名并写日记；返回重命名后的归档路径（无则 None）。
+        保持旧行为：save_audio 开启但拿不到音频文件时，日记仍要写（file_audio=None）。
+        """
+        file_audio = None
+        if Config.save_audio:
+            if file_path_pending:
+                file_manager = AudioFileManager()
+                file_manager.file_path = Path(file_path_pending)
+                file_audio = file_manager.rename(text, time_start)
+            self.diary.write(text, time_start, file_audio)
+        return file_audio
+
+    async def _editor_confirmed(self, case: dict, final_text: str, file_path_pending) -> None:
+        """编辑框 Enter 确认：改名/日记 -> 存标注(corrected) -> 恢复目标应用 -> 上屏。"""
+        from core.client.output.edit_panel import activate_app_sync
+        # message 在回调里不可得，time_start 随 case 传入；缺失时退回当前时间
+        time_start = case.get('time_start') or time.time()
+        try:
+            file_audio = self._save_audio_and_diary(final_text, time_start, file_path_pending)
+            # 标注音频优先用重命名后的归档路径；改名失败时退回待处理临时路径（文件还在原处）
+            audio_src = file_audio
+            if audio_src is None and case.get('audio_src'):
+                audio_src = Path(case['audio_src'])
+            self.app.annotation.record(
+                dict(case, status='corrected', final_text=final_text),
+                audio_src=audio_src,
+            )
+            # 回填 last_case 供「标记上一条」使用（同一 task 才回填，防与新案例串扰）
+            last = getattr(self.state, 'editor_last_case', None)
+            if last and last.get('task_id') == case.get('task_id'):
+                last['final_text'] = final_text
+                last['audio_src'] = str(file_audio) if file_audio else last.get('audio_src')
+            # 先把焦点还给用户当初说话的应用，再粘贴上屏（编辑框刚才抢占过前台焦点）
+            activate_app_sync(getattr(self.state, 'paste_target', None))
+            await self._emit_text(final_text, paste=True)
+        except Exception as e:
+            logger.error(f"[editor] 确认回调处理失败: {e}", exc_info=True)
+
+    async def _editor_canceled(self, case: dict, file_path_pending) -> None:
+        """编辑框 Esc 取消：不上屏，但按「有问题、未纠正」留存标注（音频/原识别保留）。"""
+        time_start = case.get('time_start') or time.time()
+        try:
+            raw_text = case.get('raw_text') or ''
+            file_audio = self._save_audio_and_diary(raw_text, time_start, file_path_pending)
+            audio_src = file_audio
+            if audio_src is None and case.get('audio_src'):
+                audio_src = Path(case['audio_src'])
+            self.app.annotation.record(
+                dict(case, status='problem', final_text=None),
+                audio_src=audio_src,
+            )
+            logger.info(f"[editor] 用户取消上屏，已留存问题案例 task={case.get('task_id')}")
+        except Exception as e:
+            logger.error(f"[editor] 取消回调处理失败: {e}", exc_info=True)
+
     def _cleanup(self) -> None:
         """清理资源"""
         if self.state.websocket is not None:
