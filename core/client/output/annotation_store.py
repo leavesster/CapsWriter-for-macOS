@@ -77,7 +77,7 @@ class AnnotationService:
         return entry
 
     def mark_last_problem(self) -> Dict[str, Any]:
-        """「标记上一条有问题」入口（菜单项 / ⌃⌥⌘M 热键共用）。"""
+        """「标记上一条有问题」入口（菜单项 / ⌥M 热键共用）。"""
         st = getattr(self.app, 'state', None)
         case = getattr(st, 'editor_last_case', None) if st is not None else None
         if not case:

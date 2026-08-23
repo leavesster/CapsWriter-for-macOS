@@ -287,7 +287,7 @@ class _StatusMenuController(NSObject):
             _menubar_dbg(f"persist editor_mode FAILED: {e!r}")
             print(f"[CapsWriter.app] 持久化编辑框模式失败: {e}", file=sys.stderr)
 
-    # ---- 动作：标记上一条识别有问题（与 ⌃⌥⌘M 热键同一入口）----
+    # ---- 动作：标记上一条识别有问题（与 ⌥M 热键同一入口）----
     # mark_last_problem 内部自带锁与异常兜底，主线程直调安全；
     # 无最近案例时它自行返回 {'ok': False, 'reason': 'no_case'}。
     def markLastProblem_(self, sender):
@@ -372,7 +372,7 @@ def _build_status_menu():
     # ---- 编辑框标注功能两项（2026-08-23）：开关 + 标记入口，均常驻不禁用 ----
     menu.addItem_(NSMenuItem.separatorItem())
     _menu_editor_item = _add('编辑框模式', 'toggleEditorMode:', symbol='square.and.pencil')
-    _add('标记上一条有问题  ⌃⌥⌘M', 'markLastProblem:', symbol='exclamationmark.triangle')
+    _add('标记上一条有问题  ⌥M', 'markLastProblem:', symbol='exclamationmark.triangle')
     _add("编辑热词", 'editHotwords:', symbol='square.and.pencil')
 
     menu.addItem_(NSMenuItem.separatorItem())

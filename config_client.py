@@ -57,7 +57,7 @@ class ClientConfig:
     # 菜单栏「编辑框模式」项运行时切换并持久化到 ~/.capswriter/state/editor-mode.json
     editor_mode = True
     # 「标记上一条识别有问题」的全局热键（pynput 格式；仅 macOS 注册）
-    mark_problem_hotkey = '<ctrl>+<alt>+<cmd>+m'
+    mark_problem_hotkey = '<alt>+m'
 
     save_audio = True           # 是否保存录音文件
     audio_name_len = 20         # 将录音识别结果的前多少个字存储到录音文件名中，建议不要超过200
