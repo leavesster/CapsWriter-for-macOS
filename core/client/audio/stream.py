@@ -218,6 +218,31 @@ class AudioStreamManager:
         except Exception as e:
             logger.warning(f"重载 PortAudio 时发生警告: {e}")
 
+    def _find_builtin_mic(self) -> Optional[int]:
+        """
+        在设备列表中查找 Mac 内建麦克风，返回其设备索引。
+
+        临时策略（2026-08-12）：默认输入设备会跟随耳机 / AirPods 等外设自动切换，
+        而耳机麦克风收音效果差，用户希望固定使用本机内建麦克风录音。这里按设备名
+        匹配内建麦克风：
+        - 中文系统：`MacBook Air麦克风`、`MacBook Pro麦克风`、`内建麦克风`
+        - 英文系统：`MacBook Air Microphone`、`Built-in Microphone`
+        找不到（例如 Mac mini 外接声卡）时返回 None，由调用方回退到默认输入设备。
+        """
+        try:
+            for index, dev in enumerate(sd.query_devices()):
+                if dev['max_input_channels'] <= 0:
+                    continue
+                name = dev.get('name', '')
+                if ('内建' in name or 'Built-in' in name
+                        or ('麦克风' in name and 'MacBook' in name)
+                        or ('Microphone' in name and 'MacBook' in name)):
+                    logger.info(f"找到内建麦克风: {name} (index={index})")
+                    return index
+        except Exception as e:
+            logger.warning(f"查找内建麦克风失败: {e}")
+        return None
+
     def start(self) -> Optional[sd.InputStream]:
         """
         启动音频流
@@ -231,19 +256,28 @@ class AudioStreamManager:
 
         # macOS 按需开流：每次建流前重载 PortAudio，刷新设备列表与默认输入设备。
         # 这样无论用户在系统设置里切换了麦克风、插拔了耳机，还是启动了 SoundSource
-        # 等带虚拟音频驱动的软件改变了设备拓扑，本次录音都能跟随当前真实的默认输入
-        # 设备，不再需要重启客户端。此处 start() 一定是在“无打开流”状态下被调用，
-        # 重载是安全的。
+        # 等带虚拟音频驱动的软件改变了设备拓扑，设备索引都能保持有效。此处 start()
+        # 一定是在“无打开流”状态下被调用，重载是安全的。
         if platform.system() == 'Darwin':
             self._reload_portaudio()
 
         # 检测音频设备
+        # 临时策略（2026-08-12）：macOS 优先使用本机内建麦克风（耳机麦克风收音差），
+        # 找不到内建麦克风时回退到系统默认输入设备；其它平台保持跟随默认设备不变。
+        device_index = None
         try:
-            device = sd.query_devices(kind='input')
+            if platform.system() == 'Darwin':
+                device_index = self._find_builtin_mic()
+            if device_index is not None:
+                device = sd.query_devices(device_index)
+                source_desc = '内建麦克风'
+            else:
+                device = sd.query_devices(kind='input')
+                source_desc = '默认音频设备'
             self._channels = min(2, device['max_input_channels'])
             device_name = device.get('name', '未知设备')
             console.print(
-                f'使用默认音频设备：[italic]{device_name}，声道数：{self._channels}',
+                f'使用{source_desc}：[italic]{device_name}，声道数：{self._channels}',
                 end='\n\n'
             )
             logger.info(f"找到音频设备: {device_name}, 声道数: {self._channels}")
@@ -259,14 +293,23 @@ class AudioStreamManager:
             stream = sd.InputStream(
                 samplerate=self.SAMPLE_RATE,
                 blocksize=int(self.BLOCK_DURATION * self.SAMPLE_RATE),
-                device=None,
+                device=device_index,  # 内建麦克风索引；None 时跟随系统默认输入设备
                 dtype="float32",
                 channels=self._channels,
                 callback=self._audio_callback,
                 finished_callback=self._on_stream_finished,
             )
-            stream.start()
-            
+            try:
+                stream.start()
+            except Exception:
+                # InputStream 构造成功即已向 PortAudio 申请了底层资源；若 start()
+                # 失败必须释放已创建的流，否则句柄静默泄漏（2026-08-23 补齐）。
+                try:
+                    stream.close()
+                except Exception as close_err:
+                    logger.debug(f"[audio] 回收启动失败的音频流时出错: {close_err}")
+                raise
+
             self.state.stream = stream
             self._running = True
             logger.info("[audio] stream open")
@@ -290,22 +333,65 @@ class AudioStreamManager:
         stream = self.state.stream
         self.state.stream = None  # 立即清除引用，允许新录音会话判断流已不可用
         if stream is not None:
-            # sounddevice.InputStream.close() 在录音时间极短时可能在 macOS 上卡死（PortAudio 已知问题）。
-            # 用带 5s 超时的后台线程执行，超时后放弃等待，避免持有 _session_lock 导致后续按键全部无响应。
+            # 关闭动作放到带超时的后台线程执行：即使关闭路径卡死，也不会一直持有
+            # _session_lock 导致后续按键全部无响应（2026-06 已验证的兜底策略）。
             def _close():
                 try:
+                    # 先显式 abort 再 close（2026-08-23 泄漏修复）。
+                    # 直接对运行中的流调 close() 时，PortAudio 内部需要先走“优雅停止”
+                    # 路径，在 macOS 极短录音、设备状态异常等场景下可能永远卡死；
+                    # 一旦卡死，外层 5s 超时放弃后音频流句柄就永久泄漏，表现为系统
+                    # 麦克风指示灯（橙灯）常亮、只能重启客户端恢复。
+                    # Pa_AbortStream 会立即丢弃 pending 缓冲并停止 IOProc，让后续
+                    # close() 只做纯资源释放，从根上规避挂死路径。
+                    try:
+                        if stream.active:
+                            stream.abort()
+                    except Exception as abort_err:
+                        # 流可能已自行停止/结束，abort 报错不应阻塞后续 close
+                        logger.debug(f"[audio] abort 音频流时出现异常（可忽略）: {abort_err}")
                     stream.close()
                 except Exception as e:
-                    logger.debug(f"停止音频流时发生错误: {e}")
+                    # close() 抛异常同样意味着资源可能未释放，必须以 ERROR 级留痕；
+                    # 旧实现用 DEBUG 吞掉异常，是除“close 挂死超时”外的第二个静默
+                    # 泄漏口（泄漏时日志毫无痕迹，导致取证困难）。
+                    logger.error(
+                        f"[audio] 关闭音频流时发生错误，音频流可能泄漏"
+                        f"（麦克风指示灯将常亮直至重启）: {e}",
+                        exc_info=True,
+                    )
+                    self._notify_stream_leak()
 
             t = threading.Thread(target=_close, daemon=True)
             t.start()
             t.join(timeout=5.0)
             if t.is_alive():
-                logger.warning("[audio] stream.close() 超时（5s），已放弃等待，PortAudio 流将在后台自行结束")
+                logger.error(
+                    "[audio] stream.close() 超时（5s），音频流句柄已泄漏："
+                    "系统麦克风指示灯将保持点亮，直到重启 CapsWriter 客户端"
+                )
+                self._notify_stream_leak()
             else:
                 logger.info("[audio] stream close")
                 logger.debug("音频流已停止")
+
+    def _notify_stream_leak(self) -> None:
+        """音频流句柄泄漏时通知用户。
+
+        泄漏本身不影响后续录音（新录音会开新流），但系统麦克风指示灯会常亮，
+        用户需要知情并决定何时重启客户端。通知走 ErrorBus（带去重 key，
+        避免多次泄漏时通知轰炸）；ErrorBus 不可用时静默降级。
+        """
+        try:
+            eb = getattr(self.app, 'error_bus', None)
+            if eb is not None:
+                eb.notify(
+                    "音频流关闭失败，麦克风指示灯可能常亮；"
+                    "录音仍可继续使用，方便时请重启 CapsWriter（菜单栏或 capswriter restart）",
+                    'stream_leak',
+                )
+        except Exception as e:
+            logger.debug(f"[audio] 发送音频流泄漏通知失败: {e}")
     
     def reopen(self) -> Optional[sd.InputStream]:
         """
