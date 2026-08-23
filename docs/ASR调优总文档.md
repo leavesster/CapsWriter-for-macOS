@@ -384,6 +384,23 @@ Server 侧：
 | TED-LIUM | 英文技术/科学演讲 | 只抽少量技术类片段，避免偏离 CapsWriter 场景 |
 | Earnings-22 chunked | 商业会议与电话会风格 | 少量加入，用于覆盖商业技术口语 |
 
+### v1 下载落地状态
+
+2026-07-06 已创建 `evals/datasets/capswriter_tech_asr_v1/download_sources.py`，下载策略是只拉 v1 所需的最小源文件或单个 shard，不下载公开数据集全量。
+
+已落地：
+
+- `AISHELL6-Whisper`：2026-07-08 用户 HF 访问申请已通过；已补齐 `AISHELL6-Whisper_info.csv`、`text_sentence`、`w2n.txt`、`metadata.tar.gz`、`test.tar.gz`（约 1.7GiB），用于中文真实低语样本抽取。
+- `Tech-Sentences-For-ASR-Training`：小型仓库完整下载，当前本地有 205 条音频和 205 条文本。
+- `Chinese-LiPS`：已下载元数据和 `processed_val.zip`，后续优先从 validation split 的 `KJ` 科技主题抽 35 条。
+- `TED-LIUM`：已下载 `AudioLLMs/tedlium3_test` 单个 test parquet shard，后续抽 20 条。
+- `Earnings-22 chunked`：已下载一个较小 chunked parquet shard，后续抽 10 条。
+
+待处理：
+
+- 中文真实低语是 v1 的关键维度，不能用 `low_gain` 替代；但数据源必须来自 Hugging Face、AI-SHELL 官方平台或作者认可入口，禁止接入来源不可审计、绕过审批或疑似泄露的数据包。
+- `TED-LIUM` parquet 首次下载时曾因脚本早期 `local_dir` 逻辑产生 `data/data/` 嵌套落点；脚本已兼容复用该文件，后续抽样脚本应统一搜索实际本地文件或在 manifest 构建前做规范化路径处理。
+
 ## 第一轮首要问题
 
 第一轮调优优先解决以下问题。

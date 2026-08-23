@@ -181,6 +181,11 @@ logs/
 *.wav
 *.m4a
 
+# 本地评测数据缓存：只提交 manifest / 下载说明 / 小型元数据，不提交公开数据集原始大文件
+evals/datasets/**/raw/
+evals/datasets/**/sources/
+evals/datasets/**/tmp/
+
 # 运行生成的临时文件 / 二进制
 *.exe
 *.log
@@ -211,3 +216,13 @@ release
 models/**/*.cfg
 
 .DS_Store
+
+# Claude 会话 grill 记录（个人工作笔记，不入库）
+.grill/
+# 评测运行产物与个人标注数据（含用户录音与口述文本，绝不入库）
+evals/manual_cases/audio/
+evals/manual_cases/cases.jsonl
+
+# 例外：随代码入库的回归测试脚本
+tools/test_*.py
+!tools/test_stream_stop_leak.py
