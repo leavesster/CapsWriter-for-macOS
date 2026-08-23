@@ -42,6 +42,8 @@ _PANEL_W, _PANEL_H = 680, 120
 _controller = None          # EditorPanelController 单例（主线程创建）
 _active = False             # 面板是否打开（主线程读写，读侧仅作提示用途）
 _pending = False            # present_editor 已派发但 show_panel 尚未执行（跨线程窗口）
+_pending_since = None       # _pending 置位时刻（time.monotonic()），用于看门狗判定派发丢失
+_PENDING_TIMEOUT = 5.0      # 秒：超过视为 callAfter 派发丢失，自动复位
 
 
 def is_available() -> bool:
@@ -51,6 +53,16 @@ def is_available() -> bool:
 def is_active() -> bool:
     # 同时覆盖 _pending：present_editor 在工作线程返回 True 后、主线程 show_panel
     # 置 _active 前存在一个竞态窗口，期间也应视为「面板打开」以抑制新录音。
+    global _pending, _pending_since
+    if _pending:
+        # 看门狗：callAfter 派发若丢失（主线程 RunLoop 异常等），_pending 会永久
+        # 卡 True 导致录音被永久静默抑制。超时后自动复位，宁可误弹一次面板
+        # 的竞态窗口，也不让录音永久失效。
+        if _pending_since is not None and \
+                (time.monotonic() - _pending_since) > _PENDING_TIMEOUT:
+            _pending = False
+            _pending_since = None
+            logger.warning("[edit-panel] present 派发疑似丢失，自动复位 pending 标志")
     return _active or _pending
 
 
@@ -87,10 +99,11 @@ def init_panel() -> bool:
 def present_editor(text: str, on_confirm: Callable[[str], None],
                    on_cancel: Callable[[], None]) -> bool:
     """线程安全入口：显示编辑框并预填识别文本。返回 False 时调用方回退直接上屏。"""
-    global _pending
+    global _pending, _pending_since
     if not _APPKIT_OK or _controller is None or _active or _pending:
         return False
     _pending = True
+    _pending_since = time.monotonic()
     AppHelper.callAfter(_controller.show_panel, text, on_confirm, on_cancel)
     return True
 
@@ -154,25 +167,37 @@ if _APPKIT_OK:
 
         # ---- 显示/关闭（全部主线程）----
         def show_panel(self, text, on_confirm, on_cancel):
-            global _active, _pending
+            global _active, _pending, _pending_since
             _pending = False  # 派发已到达主线程，窗口关闭
+            _pending_since = None
             if _active:
                 return
             _active = True
             self._on_confirm = on_confirm
             self._on_cancel = on_cancel
-            self.field.setStringValue_(text)
-            # 屏幕上方 1/3 水平居中，固定出现位置（v1 不记忆位置）
-            from AppKit import NSScreen
-            screen = NSScreen.mainScreen().visibleFrame()
-            x = screen.origin.x + (screen.size.width - _PANEL_W) / 2
-            y = screen.origin.y + screen.size.height * 0.72
-            self.panel.setFrameOrigin_(NSPoint(x, y))
-            from AppKit import NSApplication, NSApp
-            NSApp.activateIgnoringOtherApps_(True)
-            self.panel.makeKeyAndOrderFront_(None)
-            self.panel.makeFirstResponder_(self.field)
-            self.field.selectText_(None)  # 全选：直接说话可整段替换，点击可局部改
+            try:
+                self.field.setStringValue_(text)
+                # 屏幕上方 1/3 水平居中，固定出现位置（v1 不记忆位置）
+                from AppKit import NSScreen
+                screen = NSScreen.mainScreen().visibleFrame()
+                x = screen.origin.x + (screen.size.width - _PANEL_W) / 2
+                y = screen.origin.y + screen.size.height * 0.72
+                self.panel.setFrameOrigin_(NSPoint(x, y))
+                from AppKit import NSApplication, NSApp
+                NSApp.activateIgnoringOtherApps_(True)
+                self.panel.makeKeyAndOrderFront_(None)
+                self.panel.makeFirstResponder_(self.field)
+                self.field.selectText_(None)  # 全选：直接说话可整段替换，点击可局部改
+            except Exception:
+                # _active 已置位但面板未真正显示：回落清理，避免永久抑制录音。
+                # 不调用任何回调：面板从未成功展示给用户，确认（上屏）与取消
+                # （存「有问题、未纠正」标注）都基于「用户看过面板」这一前提，
+                # 此时静默丢弃本次结果（用户重新口述）最安全。
+                logger.error("[edit-panel] show_panel 异常，回落清理面板状态",
+                             exc_info=True)
+                self._on_confirm = None
+                self._on_cancel = None
+                self._dismiss()
 
         def _dismiss(self):
             global _active

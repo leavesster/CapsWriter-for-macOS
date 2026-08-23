@@ -291,7 +291,7 @@ class ShortcutManager:
         try:
             from core.client.output.edit_panel import is_active as _editor_active
             if _editor_active():
-                logger.debug("[editor] 编辑框打开中，忽略新的录音触发")
+                logger.warning("[editor] 编辑框打开中，忽略新的录音触发")
                 return
         except Exception:
             pass
