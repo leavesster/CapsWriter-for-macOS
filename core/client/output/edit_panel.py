@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 _PANEL_W, _PANEL_H = 680, 120
 _controller = None          # EditorPanelController 单例（主线程创建）
 _active = False             # 面板是否打开（主线程读写，读侧仅作提示用途）
+_pending = False            # present_editor 已派发但 show_panel 尚未执行（跨线程窗口）
 
 
 def is_available() -> bool:
@@ -48,7 +49,9 @@ def is_available() -> bool:
 
 
 def is_active() -> bool:
-    return _active
+    # 同时覆盖 _pending：present_editor 在工作线程返回 True 后、主线程 show_panel
+    # 置 _active 前存在一个竞态窗口，期间也应视为「面板打开」以抑制新录音。
+    return _active or _pending
 
 
 def capture_frontmost_app() -> Optional[dict]:
@@ -84,9 +87,10 @@ def init_panel() -> bool:
 def present_editor(text: str, on_confirm: Callable[[str], None],
                    on_cancel: Callable[[], None]) -> bool:
     """线程安全入口：显示编辑框并预填识别文本。返回 False 时调用方回退直接上屏。"""
-    global _active
-    if not _APPKIT_OK or _controller is None or _active:
+    global _pending
+    if not _APPKIT_OK or _controller is None or _active or _pending:
         return False
+    _pending = True
     AppHelper.callAfter(_controller.show_panel, text, on_confirm, on_cancel)
     return True
 
@@ -150,7 +154,8 @@ if _APPKIT_OK:
 
         # ---- 显示/关闭（全部主线程）----
         def show_panel(self, text, on_confirm, on_cancel):
-            global _active
+            global _active, _pending
+            _pending = False  # 派发已到达主线程，窗口关闭
             if _active:
                 return
             _active = True

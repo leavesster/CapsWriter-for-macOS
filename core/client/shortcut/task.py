@@ -98,6 +98,18 @@ class ShortcutTask:
         self.trace_id = f"{self.shortcut.key}-{time.time_ns()}"
         logger.info(f"[{self.shortcut.key}] 触发：开始录音, trace_id={self.trace_id}")
 
+        # 编辑框模式需要知道「用户此刻在哪说话」：在开流前的最早时刻记录前台应用，
+        # 作为识别完成后恢复焦点并上屏的目标。非 macOS / 面板模块不可用时置 None。
+        try:
+            if platform.system() == 'Darwin':
+                from core.client.output.edit_panel import capture_frontmost_app
+                self.state.paste_target = capture_frontmost_app()
+            else:
+                self.state.paste_target = None
+        except Exception as e:
+            logger.debug(f"记录上屏目标应用失败（忽略）: {e}")
+            self.state.paste_target = None
+
         # macOS 新路线要求“只在真正录音时占用麦克风”，因此在宣布开始录音前，
         # 先让音频流管理器按需打开输入流。
         # 注意：开流是耗时操作（数百毫秒），刻意放在锁外执行，这样启动期间到来的
