@@ -30,8 +30,14 @@
 ### 第一步：克隆仓库
 
 ```bash
-git clone https://github.com/EdgarZhong/CapsWriter-for-macOS.git
+git clone --recurse-submodules https://github.com/EdgarZhong/CapsWriter-for-macOS.git
 cd CapsWriter-for-macOS
+```
+
+如果已经用普通 `git clone` 拉取过仓库，请先补齐 MLX 推理子仓库：
+
+```bash
+git submodule update --init --recursive mlx-qwen3-asr
 ```
 
 ### 第二步：本地安装
@@ -45,6 +51,7 @@ bash install.sh
 `install.sh` 会自动完成以下事项：
 
 - 创建 / 检查 `.venv`（Python 3.13）
+- 初始化 / 检查 `mlx-qwen3-asr` 推理子仓库
 - 安装 / 更新 client 与 server 依赖
 - 在当前机器重建 `CapsWriter.app` 启动器
 - 安装全局 `capswriter` 命令到 `~/.local/bin`
@@ -215,6 +222,14 @@ Qwen3-ASR   | 千问ASR
 capswriter restart
 ```
 
+## 关键文档
+
+| 文档 | 路径 | 内容 |
+|------|------|------|
+| macOS 架构决策 | `docs/macos-architecture-decisions.md` | launchd 双 agent、权限引导、菜单栏、推理后端演进等核心决策 |
+| Qwen3-ASR macOS 适配规格 | `docs/Qwen3-ASR_macOS_最小适配规划.md` | macOS 版 Qwen3-ASR 后端接入范围、模型规格和阶段边界 |
+| ASR 调优总文档 | `docs/ASR调优总文档.md` | 当前 ASR 调优口径、第一轮评测数据集组合方案和首要问题 |
+
 ---
 
 ## 与原版的区别
@@ -222,7 +237,7 @@ capswriter restart
 | 项目 | 原版（Windows） | 本 fork（macOS） |
 |------|----------------|-----------------|
 | 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
-| 推理后端 | ONNX（sherpa-onnx） | Apple MLX |
+| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与 MLX wired memory 常驻额度 |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |

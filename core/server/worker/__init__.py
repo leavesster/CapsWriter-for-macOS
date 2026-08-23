@@ -2,7 +2,7 @@
 """
 识别子进程工作包 (Worker Package)
 
-包含模型加载、任务处理和 Worker 门面类。
+包含模型加载、工作单元处理和 Worker 门面类。
 """
 
 from multiprocessing import Queue
