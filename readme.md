@@ -67,6 +67,8 @@ bash install.sh
 | 1.7B-8bit（默认） | `mlx-community/Qwen3-ASR-1.7B-8bit` | ~1.8 GB | 日常使用 |
 | 1.7B-4bit（轻量） | `mlx-community/Qwen3-ASR-1.7B-4bit` | ~1.0 GB | 低内存 / 重度离电 |
 
+> **状态说明**：macOS 的 `qwen_asr_mlx`（MLX 后端，经 `mlx-qwen3-asr` 子仓库 Runner 流式喂音频）目前为**实验性**后端，仍在精度调优中；原版 Windows `qwen_asr`（GGUF）为稳定基线。遇到识别质量异常欢迎提 issue 反馈。
+
 ```bash
 uv pip install --python .venv/bin/python huggingface_hub
 
