@@ -72,6 +72,12 @@ class ClientState:
     
     # 最近一次输出内容（如果是 LLM 润色，则是润色结果；否则是原始识别结果）
     last_output_text: Optional[str] = None
+
+    # 按下 Caps 时刻记录的前台应用（编辑框确认后恢复焦点并上屏的目标）
+    paste_target: Optional[Dict[str, Any]] = None
+
+    # 最近一条完成的识别案例（供「标记上一条有问题」与编辑框标注共用）
+    editor_last_case: Optional[Dict[str, Any]] = None
     
 
     
@@ -110,6 +116,8 @@ class ClientState:
         self.trace_contexts.clear()
         self.task_trace_map.clear()
         self.first_audio_logged_trace_ids.clear()
+        self.paste_target = None
+        self.editor_last_case = None
         
         logger.debug("客户端状态重置完成")
     

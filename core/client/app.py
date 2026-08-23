@@ -112,6 +112,17 @@ class CapsWriterClient:
             self.remap_session = MacOSCapsRemapSession()
             self.macos_caps_bridge = MacOSCapsF18Bridge(self)
 
+        # 编辑框模式运行时开关持久化：菜单切换写入 ~/.capswriter/state/editor-mode.json，
+        # 启动时读回覆盖默认值，保证用户选择跨重启生效
+        if system() == 'Darwin':
+            try:
+                import json as _json
+                _p = Path.home() / '.capswriter' / 'state' / 'editor-mode.json'
+                if _p.exists():
+                    Config.editor_mode = bool(_json.loads(_p.read_text()).get('enabled', True))
+            except Exception as e:
+                logger.debug(f"读取编辑框模式持久化失败（忽略，用默认值）: {e}")
+
         # 内存清理
         empty_current_working_set()
 
