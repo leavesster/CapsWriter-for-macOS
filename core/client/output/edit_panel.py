@@ -210,14 +210,23 @@ if _APPKIT_OK:
             self._on_confirm = self._on_cancel = None
             self._dismiss()
             if cb is not None:
-                cb(final)
+                # 退出竞态下 asyncio.run_coroutine_threadsafe 可能抛 RuntimeError
+                # （事件循环已关闭），不能让它穿透 PyObjC 委托打断 AppKit 主线程
+                try:
+                    cb(final)
+                except Exception:
+                    logger.error("[edit-panel] 确认回调异常（忽略）", exc_info=True)
 
         def _cancel(self):
             cb = self._on_cancel
             self._on_confirm = self._on_cancel = None
             self._dismiss()
             if cb is not None:
-                cb()
+                # 同上：取消回调异常不外抛，仅留痕
+                try:
+                    cb()
+                except Exception:
+                    logger.error("[edit-panel] 取消回调异常（忽略）", exc_info=True)
 
         # ---- NSTextField 委托：Enter/Esc ----
         # 方法名必须映射三段 selector control:textView:doCommandBySelector:

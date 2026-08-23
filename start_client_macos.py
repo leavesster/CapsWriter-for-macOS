@@ -169,6 +169,7 @@ _status_menu = None
 _menu_controller = None
 _menu_header_item = None
 _menu_copy_item = None
+_menu_editor_item = None   # 「编辑框模式」开关项（勾选态随 menuNeedsUpdate 刷新）
 
 
 def _format_status_title() -> str:
@@ -241,6 +242,17 @@ class _StatusMenuController(NSObject):
             _menu_header_item.setTitle_(_format_status_title())
         if _menu_copy_item is not None:
             _menu_copy_item.setEnabled_(bool(_recent_text()))
+        # 「编辑框模式」勾选态：读 Config 实时值（启动时可能已被
+        # ~/.capswriter/state/editor-mode.json 持久化覆盖过）
+        if _menu_editor_item is not None:
+            try:
+                from config_client import ClientConfig as _Cfg
+                from AppKit import NSControlStateValueOn, NSControlStateValueOff
+                _menu_editor_item.setState_(
+                    NSControlStateValueOn if getattr(_Cfg, 'editor_mode', False)
+                    else NSControlStateValueOff)
+            except Exception as e:
+                _menubar_dbg(f"refresh editor-mode state FAILED: {e!r}")
 
     # ---- 动作：复制最近结果到剪贴板 ----
     def copyRecentResult_(self, sender):
@@ -254,6 +266,39 @@ class _StatusMenuController(NSObject):
             pb.setString_forType_(text, NSPasteboardTypeString)
         except Exception as e:
             print(f"[CapsWriter.app] 复制最近结果失败: {e}", file=sys.stderr)
+
+    # ---- 动作：切换编辑框模式（写运行时配置 + 持久化）----
+    # 菜单回调运行在 AppKit 主线程；写文件毫秒级，可直调（与复制/重启等
+    # 现有菜单动作的线程口径一致）。读 Config 实时值而非快照，保证与
+    # 启动时持久化覆盖后的状态一致。
+    def toggleEditorMode_(self, sender):
+        import json
+        from config_client import ClientConfig as Config
+        new = not getattr(Config, 'editor_mode', False)
+        Config.editor_mode = new
+        try:
+            p = Path.home() / '.capswriter' / 'state' / 'editor-mode.json'
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # 必须写布尔值（json.dumps 保证），启动侧按 bool(...['enabled']) 读回
+            p.write_text(json.dumps({'enabled': bool(new)}))
+            _menubar_dbg(f"editor_mode -> {new} (persisted)")
+        except Exception as e:
+            # 持久化失败不崩：本次会话内开关仍生效，仅重启后回默认
+            _menubar_dbg(f"persist editor_mode FAILED: {e!r}")
+            print(f"[CapsWriter.app] 持久化编辑框模式失败: {e}", file=sys.stderr)
+
+    # ---- 动作：标记上一条识别有问题（与 ⌃⌥⌘M 热键同一入口）----
+    # mark_last_problem 内部自带锁与异常兜底，主线程直调安全；
+    # 无最近案例时它自行返回 {'ok': False, 'reason': 'no_case'}。
+    def markLastProblem_(self, sender):
+        with _client_lock:
+            c = _client
+        ann = getattr(c, 'annotation', None) if c is not None else None
+        if ann is not None:
+            try:
+                ann.mark_last_problem()
+            except Exception as e:
+                _menubar_dbg(f"mark_last_problem FAILED: {e!r}")
 
     # ---- 动作：用系统默认文本编辑器打开 hot.txt ----
     def editHotwords_(self, sender):
@@ -299,7 +344,7 @@ def _build_status_menu():
     """构建原生 NSMenu 并挂上各项。返回 NSMenu。"""
     from AppKit import NSMenu, NSMenuItem
 
-    global _menu_controller, _menu_header_item, _menu_copy_item
+    global _menu_controller, _menu_header_item, _menu_copy_item, _menu_editor_item
 
     menu = NSMenu.alloc().init()
     # 关闭自动启停：自行管理各项可用态（表头禁用、复制项按有无结果动态置灰）
@@ -324,6 +369,10 @@ def _build_status_menu():
 
     menu.addItem_(NSMenuItem.separatorItem())
     copy_item = _add("复制最近结果", 'copyRecentResult:', symbol='doc.on.clipboard')
+    # ---- 编辑框标注功能两项（2026-08-23）：开关 + 标记入口，均常驻不禁用 ----
+    menu.addItem_(NSMenuItem.separatorItem())
+    _menu_editor_item = _add('编辑框模式', 'toggleEditorMode:', symbol='square.and.pencil')
+    _add('标记上一条有问题  ⌃⌥⌘M', 'markLastProblem:', symbol='exclamationmark.triangle')
     _add("编辑热词", 'editHotwords:', symbol='square.and.pencil')
 
     menu.addItem_(NSMenuItem.separatorItem())
@@ -394,6 +443,16 @@ class _AppDelegate(NSObject):
         """
         # 先在菜单栏挂出图标（主线程），使其与客户端 .app 同生命周期出现
         _install_status_item()
+
+        # 编辑框面板必须在主线程创建（编辑框标注模式）；失败仅降级为直接上屏，
+        # 不阻断客户端启动（import 失败静默，如非 macOS 环境缺 PyObjC）
+        try:
+            from core.client.output.edit_panel import init_panel
+            if not init_panel():
+                print('[CapsWriter.app] 编辑面板初始化失败，编辑框模式回退直接上屏',
+                      file=sys.stderr)
+        except Exception as e:
+            print(f'[CapsWriter.app] 编辑面板初始化异常: {e}', file=sys.stderr)
 
         try:
             import AVFoundation as _avf
