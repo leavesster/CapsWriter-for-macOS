@@ -44,17 +44,18 @@ mark_item_title = _load_pure_function(PROJECT_ROOT / 'start_client_macos.py', 'm
 
 
 def test_hotkey_and_editor_commands() -> None:
-    """全局热键与 NSTextView selector 分类必须严格对应 8 月 24 日口径。"""
+    """按键分类必须以 Shift 状态而非 selector 猜测物理按键。"""
     assert Config.mark_problem_hotkey == '<ctrl>+<alt>+m'
-    assert editor_command('insertNewline:') == 'confirm'
-    assert editor_command('insertNewlineIgnoringFieldEditor:') == 'newline'
-    assert editor_command('cancelOperation:') == 'cancel'
+    assert editor_command('insertNewline:', shift_pressed=False) == 'confirm'
+    assert editor_command('insertNewline:', shift_pressed=True) == 'newline'
+    assert editor_command('insertNewlineIgnoringFieldEditor:', shift_pressed=False) is None
+    assert editor_command('cancelOperation:', shift_pressed=False) == 'cancel'
 
 
 def test_mark_menu_title() -> None:
-    """仅“编辑框确认且有 final”归入真值不可靠，其余均为转录有误。"""
+    """所有编辑框确认条均归入真值不可靠，不依赖 final 文本是否为空。"""
     assert mark_item_title({'kind': 'editor_confirmed', 'final_text': '已确认'}) == '标记上一条真值不可靠  ⌃⌥M'
-    assert mark_item_title({'kind': 'editor_confirmed', 'final_text': ''}) == '标记上一条转录有误  ⌃⌥M'
+    assert mark_item_title({'kind': 'editor_confirmed', 'final_text': ''}) == '标记上一条真值不可靠  ⌃⌥M'
     assert mark_item_title({'kind': 'editor_canceled', 'raw_text': '已放弃'}) == '标记上一条转录有误  ⌃⌥M'
     assert mark_item_title({'kind': 'direct', 'raw_text': '直接输出'}) == '标记上一条转录有误  ⌃⌥M'
 
@@ -65,6 +66,7 @@ def test_self_target_guard() -> None:
     assert _is_self_target({'pid': 1, 'bundle_id': 'com.capswriter.client', 'name': '任意名称'})
     assert _is_self_target({'pid': 1, 'bundle_id': 'com.example.editor', 'name': 'CapsWriter'})
     assert not _is_self_target({'pid': 1, 'bundle_id': 'com.apple.TextEdit', 'name': 'TextEdit'})
+    assert not _is_self_target({'pid': 1, 'bundle_id': 'com.capswriter.notes', 'name': 'CapsWriter Notes'})
 
 
 if __name__ == '__main__':

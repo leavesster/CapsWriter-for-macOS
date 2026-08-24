@@ -221,17 +221,15 @@ def _recent_text() -> str | None:
 def mark_item_title(editor_last_case: dict | None) -> str:
     """按最近案例生成「标记上一条」菜单标题（2026-08-24 口径）。
 
-    - 上一条是编辑框 Enter 确认条（kind=editor_confirmed，有 final）：
-      标记的是「真值不可靠」--用户采集的 final 不可采信
+    - 上一条是编辑框 Enter 确认条（kind=editor_confirmed）：
+      标记的是「真值不可靠」--该类条目的 final 按 Task 1 统一不可采信，即使为空
     - 其余（编辑框 Esc 放弃条 / 非编辑框条）：标记的是「转录有误」
 
     这是不读取客户端状态的纯函数，供离线测试固定菜单文案；实时状态读取留在
     `_mark_item_title`，保证菜单每次展开仍以当下的 editor_last_case 为准。
     """
     title = '标记上一条转录有误  ⌃⌥M'
-    if (editor_last_case
-            and editor_last_case.get('kind') == 'editor_confirmed'
-            and editor_last_case.get('final_text')):
+    if editor_last_case and editor_last_case.get('kind') == 'editor_confirmed':
         title = '标记上一条真值不可靠  ⌃⌥M'
     return title
 

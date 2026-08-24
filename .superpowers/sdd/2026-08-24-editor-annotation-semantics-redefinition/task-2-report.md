@@ -49,3 +49,41 @@ $ git diff --check
 - 已核对：暂存/提交只包含 Task 2 指定的 4 个实现文件、被忽略但要求提交的定向测试，以及本报告；未包含 `CLAUDE.md`、计划文档或 Task 1 文件。
 - `editor_command()` 额外兼容 `insertLineBreak:`，以覆盖 NSTextView 在部分键盘布局中派发的 Shift+Enter selector；产品文案只承诺 Shift+Enter，不承诺 Option+Enter。
 - 当前环境缺少 PyObjC，无法对 NSScrollView 的真机可滚动性、毛玻璃和键盘 selector 做运行时验收；需在 macOS 客户端启动后以超长文本完成一次人工复验。
+
+## 修复轮 1/5（`ea032c6` 后 Important findings）
+
+### 修复内容
+
+- 菜单纯函数 `mark_item_title()` 现只按 `editor_last_case.kind == 'editor_confirmed'` 判断「真值不可靠」，不再依赖 `final_text` 是否非空；与 Task 1 的 `final_unreliable` 语义一致。
+- `editor_command()` 现显式接收 `shift_pressed`。仅 `insertNewline:` 且 Shift 为真时返回 `newline`；无 Shift 时返回 `confirm`。`insertLineBreak:` 与 `insertNewlineIgnoringFieldEditor:` 不再被 selector 本身误判为 Shift+Enter，因为标准 AppKit 键绑定可将它们用于 Control/Option 组合。
+- `textView_doCommandBySelector_` 从 `NSEvent.modifierFlags()` 读取 `NSEventModifierFlagShift` 后传给纯函数，保持运行时路径与离线测试的同一分类逻辑。
+- 定向测试补充了 `CapsWriter Notes` / `com.capswriter.notes` 的自身目标守卫负例。
+
+### RED / GREEN 证据与完整输出
+
+RED（先更新测试，尚未更新纯函数签名）：
+
+```text
+$ python tools/test_editor_ui_contract.py
+Traceback (most recent call last):
+  File "/Users/edgar/programs/CapsWriter-Offline/tools/test_editor_ui_contract.py", line 73, in <module>
+    test_hotkey_and_editor_commands()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/edgar/programs/CapsWriter-Offline/tools/test_editor_ui_contract.py", line 49, in test_hotkey_and_editor_commands
+    assert editor_command('insertNewline:', shift_pressed=False) == 'confirm'
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: editor_command() got an unexpected keyword argument 'shift_pressed'
+```
+
+GREEN：
+
+```text
+$ python tools/test_editor_ui_contract.py
+PASS: editor UI contract
+
+$ python -m py_compile core/client/output/edit_panel.py core/client/shortcut/task.py config_client.py start_client_macos.py tools/test_editor_ui_contract.py
+# exit 0（无输出）
+
+$ git diff --check
+# exit 0（无输出）
+```

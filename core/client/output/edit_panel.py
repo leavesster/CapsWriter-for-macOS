@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 try:
     from AppKit import (
+        NSEvent, NSEventModifierFlagShift,
         NSPanel, NSScrollView, NSTextView, NSFont, NSWindowStyleMaskBorderless,
         NSBackingStoreBuffered, NSFloatingWindowLevel,
         NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -58,18 +59,19 @@ _pending_since = None       # _pending 置位时刻（time.monotonic()），用�
 _PENDING_TIMEOUT = 5.0      # 秒：超过视为 callAfter 派发丢失，自动复位
 
 
-def editor_command(selector: str) -> Optional[str]:
+def editor_command(selector: str, *, shift_pressed: bool = False) -> Optional[str]:
     """将 NSTextView selector 归为稳定的编辑框产品命令。
 
     此函数故意不接触 AppKit 实例，供离线测试锁定 Enter、Shift+Enter、Esc 与 Tab
-    的语义。`insertLineBreak:` 是 NSTextView 在部分键盘布局中为 Shift+Enter 发送的
-    selector；`insertNewlineIgnoringFieldEditor:` 保持同一“手动换行”类别，避免
-    平台 selector 差异改变产品行为。
+    的语义。NSTextView 的 selector 不能可靠表达物理修饰键：标准键绑定中
+    `insertLineBreak:`/`insertNewlineIgnoringFieldEditor:` 分别可对应 Control/Option
+    组合。因此只以显式传入的 Shift 状态决定 `insertNewline:` 是确认还是手动换行。
     """
+    if selector == 'insertNewline:':
+        # 编辑框产品口径只定义 Enter 与 Shift+Enter：同一 selector 下必须查看
+        # 物理 Shift 状态，不能把 Option/Control 对应的其它 selector 误当 Shift。
+        return 'newline' if shift_pressed else 'confirm'
     commands = {
-        'insertNewline:': 'confirm',
-        'insertNewlineIgnoringFieldEditor:': 'newline',
-        'insertLineBreak:': 'newline',
         'cancelOperation:': 'cancel',
         'complete:': 'cancel',
         'insertTab:': 'tab',
@@ -352,8 +354,10 @@ if _APPKIT_OK:
 
         def textView_doCommandBySelector_(self, tv, selector):
             # 委托只消费 editor_command 的分类结果，按键 selector 的平台差异集中在
-            # 纯函数内，避免 UI 层与离线契约测试各自维护一套判断。
-            command = editor_command(str(selector))
+            # 纯函数内。selector 无法证明 Shift 是否按下，故从当前 AppKit 事件读取
+            # 物理修饰状态并显式传入，确保 Shift+Enter 不会落入普通 Enter 的确认。
+            shift_pressed = bool(NSEvent.modifierFlags() & NSEventModifierFlagShift)
+            command = editor_command(str(selector), shift_pressed=shift_pressed)
             if command == 'confirm':
                 # 纯 Enter = 确认编辑并上屏
                 self._confirm()
