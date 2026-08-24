@@ -2,9 +2,9 @@
 """
 标注落盘服务（编辑框标注功能，2026-08-23 创建；2026-08-24 语义重定义）
 
-把「真实语音 + 用户编辑后的正确文本」沉淀为评测数据：
-- 音频：从运行期录音目录拷贝到 evals/manual_cases/audio/（防录音目录被清理后标注失效）
-- 元数据：追加到 evals/manual_cases/cases.jsonl，一行一案例
+把「真实语音 + 用户编辑后的正确文本」沉淀为 v2 评测数据：
+- 音频：从运行期录音目录拷贝到 evals/manual_cases/v2/audio/（防录音目录被清理后标注失效）
+- 元数据：追加到 evals/manual_cases/v2/cases.jsonl，一行一案例
 
 status 口径（2026-08-24）：
 - corrected       = 编辑框 Enter 确认（raw + 用户编辑的 final 真值）
@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 # 通知摘录长度（字符）
 _SNIPPET_LEN = 20
 
+# 标注记录格式版本。v2 与未带版本字段的历史 v1 物理隔离，防止低可信旧数据
+# 被后续默认评测混入；所有新写入都必须由服务端固定赋值，不能相信调用方传入值。
+ANNOTATION_VERSION = 2
+
 
 def is_invalid_annotation_case(
     raw_text: str, recording_duration: Optional[float]
@@ -57,8 +61,8 @@ class AnnotationService:
 
     def __init__(self, app: CapsWriterClient):
         self.app = app
-        # base_dir = 项目根；标注库固定落在 evals/manual_cases/（evals 结构约定）
-        self.root = Path(app.base_dir) / 'evals' / 'manual_cases'
+        # base_dir = 项目根；v2 必须独占物理目录，绝不迁移或改写旧 v1 根目录。
+        self.root = Path(app.base_dir) / 'evals' / 'manual_cases' / 'v2'
         self.audio_dir = self.root / 'audio'
         self.jsonl_path = self.root / 'cases.jsonl'
         self._lock = threading.Lock()
@@ -81,6 +85,8 @@ class AnnotationService:
                 f"dur={case.get('recording_duration')}")
             return {'skipped': True, 'reason': 'invalid_case'}
         entry: Dict[str, Any] = {
+            # 固定由当前服务声明格式版本，避免任意调用方误标或伪造历史版本。
+            'annotation_version': ANNOTATION_VERSION,
             'ts': case.get('ts') or time.strftime('%Y-%m-%dT%H:%M:%S'),
             'task_id': case.get('task_id'),
             'status': case.get('status', 'corrected'),

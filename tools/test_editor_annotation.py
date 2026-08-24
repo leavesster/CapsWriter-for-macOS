@@ -2,14 +2,15 @@
 """AnnotationService 标注落盘隔离测试（2026-08-23 创建，2026-08-24 语义重定义）。
 
 场景：
-1. record 正常写 JSONL + 拷贝音频到 audio/；
-2. record audio_src=None 不崩、audio_file 为 null；
-3. 无效案例过滤（时长 <0.5s / 已知时长 <2s 且空文本）不入库；
+1. v2 物理隔离：新版路径、固定版本字段和音频相对路径；伪造旧 v1 文件逐字节不变；
+2. record 正常写 JSONL + 拷贝音频到 audio/；
+3. record audio_src=None 不崩、audio_file 为 null；
+4. 无效案例过滤（时长 <0.5s / 已知时长 <2s 且空文本）不入库；
    时长未知不能仅凭空文本判成无效条；
-4. mark_last_problem 语义分流：editor_confirmed -> final_unreliable（真值不可靠，
+5. mark_last_problem 语义分流：editor_confirmed -> final_unreliable（真值不可靠，
    通知摘录取 final）；direct / editor_canceled -> raw_unreliable（转录有误）；
    无案例拒绝 / 重复标记去重 / 通知带内容摘录；
-5. record 落盘异常（root 不可写）不上抛，mark_last_problem 返回 write_failed
+6. record 落盘异常（root 不可写）不上抛，mark_last_problem 返回 write_failed
    且不置去重标记（可重试）。
 
 测试通过假 app.base_dir 把 root 定位到临时目录，绝不写真实 evals/manual_cases。
@@ -59,8 +60,50 @@ def _make_svc(base: Path):
     return AnnotationService(app), app
 
 
+def case_v2_physical_isolation(tmp: Path):
+    """场景 1：新版只写 v2；伪造旧 v1 元数据必须逐字节保持不变。
+
+    此测试刻意只在 tempfile 创建假旧文件，既证明新版不会误写旧目录，
+    也避免测试读取、打印或修改任何真实个人标注与音频内容。
+    """
+    # 先验证全新安装只会创建 v2，不会意外创建旧根目录 JSONL。
+    fresh_base = tmp / 'fresh'
+    fresh_svc, _ = _make_svc(fresh_base)
+    assert fresh_svc.root == fresh_base / 'evals' / 'manual_cases' / 'v2'
+    fresh_svc.record({'task_id': 'fresh-v2', 'raw_text': '新数据', 'recording_duration': 3.0})
+    assert not (fresh_base / 'evals' / 'manual_cases' / 'cases.jsonl').exists()
+
+    # 再单独伪造旧 v1 文件，验证写 v2 后旧文件仍逐字节不变。
+    legacy_base = tmp / 'legacy'
+    old_jsonl = legacy_base / 'evals' / 'manual_cases' / 'cases.jsonl'
+    old_jsonl.parent.mkdir(parents=True)
+    old_bytes = b'{"legacy":"v1 bytes must remain unchanged"}\n'
+    old_jsonl.write_bytes(old_bytes)
+
+    svc, _ = _make_svc(legacy_base)
+    src = legacy_base / 'fake.mp3'
+    src.write_bytes(b'ID3-v2-isolation')
+    entry = svc.record(
+        {
+            'ts': '2026-08-24T12:00:00',
+            'task_id': 'v2-case',
+            'status': 'corrected',
+            'raw_text': '新版原始文本',
+            'final_text': '新版确认文本',
+            'recording_duration': 3.0,
+        },
+        audio_src=src,
+    )
+
+    assert svc.root == legacy_base / 'evals' / 'manual_cases' / 'v2'
+    assert entry['annotation_version'] == 2
+    assert entry['audio_file'] and entry['audio_file'].startswith('audio/')
+    assert old_jsonl.read_bytes() == old_bytes, '旧 v1 JSONL 必须逐字节保持不变'
+    print('  case_v2_physical_isolation: PASS')
+
+
 def case_record_and_copy(tmp: Path):
-    """场景 1：record 正常写 JSONL + 拷贝音频 + 返回含相对路径的 entry"""
+    """场景 2：record 正常写 JSONL + 拷贝音频 + 返回含相对路径的 entry"""
     svc, _ = _make_svc(tmp)
     src = tmp / 'fake.mp3'
     src.write_bytes(b'ID3xxxx')
@@ -102,7 +145,7 @@ def case_record_and_copy(tmp: Path):
 
 
 def case_record_no_audio(tmp: Path):
-    """场景 2：audio_src=None 不崩、audio_file 为 null"""
+    """场景 3：audio_src=None 不崩、audio_file 为 null"""
     svc, _ = _make_svc(tmp)
     e = svc.record({'task_id': 'tid-x', 'status': 'corrected', 'raw_text': 'r',
                     'final_text': 'f', 'recording_duration': 4.0},
@@ -118,7 +161,7 @@ def case_record_no_audio(tmp: Path):
 
 
 def case_invalid_filtered(tmp: Path):
-    """场景 3：无效案例（过短/为空）不入库（record 层兜底过滤）"""
+    """场景 4：无效案例（过短/为空）不入库（record 层兜底过滤）"""
     svc, _ = _make_svc(tmp)
     # ①时长 <0.5s（即使非空）
     r1 = svc.record({'task_id': 't1', 'raw_text': '嗯', 'recording_duration': 0.3})
@@ -139,7 +182,7 @@ def case_invalid_filtered(tmp: Path):
 
 
 def case_mark_last_problem(tmp: Path):
-    """场景 4：两种标记语义分流 + 摘录 + 去重 + 拒绝"""
+    """场景 5：两种标记语义分流 + 摘录 + 去重 + 拒绝"""
     svc, app = _make_svc(tmp)
     src = tmp / 'fake.mp3'
     src.write_bytes(b'ID3xxxx')
@@ -241,7 +284,7 @@ def case_mark_last_problem(tmp: Path):
 
 
 def case_record_error_swallowed(tmp: Path):
-    """场景 5：root 不可写时 record 不上抛、mark 返回 write_failed 且可重试"""
+    """场景 6：root 不可写时 record 不上抛、mark 返回 write_failed 且可重试"""
     blocker = tmp / 'blocker'
     blocker.write_bytes(b'not-a-dir')  # base_dir 指向一个文件 -> mkdir 必失败
     svc, app = _make_svc(blocker)
@@ -272,13 +315,14 @@ def case_record_error_swallowed(tmp: Path):
 def main():
     tmp = Path(tempfile.mkdtemp())
     try:
-        for sub in ('s1', 's2', 's3', 's4'):
+        for sub in ('s1', 's2', 's3', 's4', 's5'):
             (tmp / sub).mkdir()
         print('annotation_store 标注落盘测试：')
-        case_record_and_copy(tmp / 's1')
-        case_record_no_audio(tmp / 's2')
-        case_invalid_filtered(tmp / 's3')
-        case_mark_last_problem(tmp / 's4')
+        case_v2_physical_isolation(tmp / 's1')
+        case_record_and_copy(tmp / 's2')
+        case_record_no_audio(tmp / 's3')
+        case_invalid_filtered(tmp / 's4')
+        case_mark_last_problem(tmp / 's5')
         case_record_error_swallowed(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
