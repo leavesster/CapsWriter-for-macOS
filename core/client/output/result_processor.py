@@ -18,6 +18,7 @@ from core.client.state import console
 from core.protocol import RecognitionMessage
 
 from core.client.output.text_output import TextOutput
+from core.client.output.annotation_store import is_invalid_annotation_case
 from core.tools.window_detector import get_active_window_info
 from . import logger
 
@@ -305,30 +306,51 @@ class ResultProcessor:
                 log_str = "; ".join([f"{origin}->{hw}({score:.2f})" for origin, hw, score in potential_matches])
                 logger.debug(f"潜在热词: {log_str}")
 
+        # ===== 无效条闸门（2026-08-24，方案 A：只管标注域）=====
+        # 命中：①时长 <0.5s（用户正常短句实测 0.70s 校准）②时长 <2s 且转录为空
+        # （>2s 的空录音保留）。命中即视为误触发条：每次必弹通知（key 带 task_id
+        # 防去重聚合）+ 不开编辑框 + 不登记 last_case；剪贴板/上屏/音频/日记等
+        # 既有链路一律不动（落回直接输出路径，空文本由输出层既有守卫拦住）。
+        # 录音时长：从 trace 上下文推（完成请求时刻 - 录音开始时刻），缺项则留空
+        recording_duration = None
+        if trace_context:
+            _fin = trace_context.get('finish_requested_time')
+            _beg = trace_context.get('recording_start_time')
+            if _fin is not None and _beg is not None:
+                recording_duration = _fin - _beg
+        # 必须用服务端原始转录判定，而非热词/规则处理后的 text；无效条是录音
+        # 事实，不应被后处理规则偶然改写。判定函数同时被 AnnotationService 复用。
+        invalid_case = is_invalid_annotation_case(original_text, recording_duration)
+        if invalid_case:
+            eb = getattr(self.app, 'error_bus', None)
+            if eb is not None:
+                try:
+                    # key 拼 task_id：ErrorBus 同 key 30s 去重，必须保证每次误触发都弹
+                    eb.notify('录音时间过短或为空，本条不计入标注系统',
+                              f'invalid_case_{message.task_id}')
+                except Exception as e:
+                    logger.debug(f"[annotation] 无效条通知发送失败: {e}")
+            console.print('    [yellow]录音时间过短或为空，本条不计入标注系统[/yellow]')
+
         # ===== 编辑框模式（macOS）：结果先进编辑框，确认后再上屏/存标注 =====
-        # 仅拦截非 LLM 路径（LLM 有自己的输出管线）；面板不可用/已在显示时回退旧行为。
+        # 仅拦截非 LLM 路径（LLM 有自己的输出管线）；面板不可用/已在显示/无效条
+        # 时回退旧行为（无效条回退后也不登记 last_case）。
         use_editor = (
             sys.platform == 'darwin'
             and getattr(Config, 'editor_mode', False)
             and not Config.llm_enabled
+            and not invalid_case
         )
         file_path_pending = None
         if Config.save_audio:
-            # 音频路径必须在此时弹出（无论走哪条输出路径），编辑框确认/取消回调里再重命名，
+            # 音频路径必须在此时弹出（无论走哪条输出路径），编辑框确认/放弃回调里再重命名，
             # 避免直接输出路径先把文件移走导致标注案例拿不到音频
             file_path_pending = self.state.pop_audio_file(message.task_id)
 
         if use_editor:
             from core.client.output.edit_panel import present_editor
             import datetime as _dt
-            # 录音时长：从 trace 上下文推（完成请求时刻 - 录音开始时刻），缺项则留空
-            recording_duration = None
-            if trace_context:
-                _fin = trace_context.get('finish_requested_time')
-                _beg = trace_context.get('recording_start_time')
-                if _fin is not None and _beg is not None:
-                    recording_duration = _fin - _beg
-            # case 公共字段：编辑确认/取消回调共用（回调里只能拿到 dict，拿不到 message）
+            # case 公共字段：确认/放弃回调共用（回调里只能拿到 dict，拿不到 message）
             case_common = {
                 'ts': _dt.datetime.now().isoformat(timespec='seconds'),
                 'task_id': message.task_id,
@@ -337,9 +359,10 @@ class ResultProcessor:
                 'recording_duration': recording_duration,
                 'source_app': getattr(self.state, 'paste_target', None),
                 'audio_src': str(file_path_pending) if file_path_pending else None,
+                'mode': 'editor',
             }
-            # 供「标记上一条有问题」使用（编辑确认后回填 final_text / audio_src）
-            self.state.editor_last_case = dict(case_common, mode='editor', marked=False)
+            # 注意：last_case 不在这里登记--「在框里等待编辑的不叫上一条」，
+            # 只有 Enter/Esc 把面板关闭后才在回调里登记（kind 区分两种关闭方式）。
 
             def _on_confirm(final_text: str):
                 # 回调在主线程（AppKit）执行：把真正的工作派发回客户端事件循环
@@ -347,13 +370,13 @@ class ResultProcessor:
                     self._editor_confirmed(dict(case_common), final_text, file_path_pending),
                     self.app.loop)
 
-            def _on_cancel():
+            def _on_cancel(panel_text: str):
                 asyncio.run_coroutine_threadsafe(
-                    self._editor_canceled(dict(case_common), file_path_pending),
+                    self._editor_canceled(dict(case_common), file_path_pending, panel_text),
                     self.app.loop)
 
             if present_editor(text, _on_confirm, _on_cancel):
-                return  # 上屏/改名/日记全部推迟到确认或取消回调
+                return  # 上屏/改名/日记全部推迟到确认或放弃回调
             # 面板不可用/已占用：落回直接输出路径（下方继续，含 last_case 登记）
 
         # 窗口兼容性检测
@@ -388,9 +411,12 @@ class ResultProcessor:
                 file_audio
             )
 
-        # 直接输出路径也登记 last_case，供「标记上一条有问题」热键/菜单使用。
-        # （编辑框路径在上方进入分支后已 return，不会走到这里；LLM 路径有自己的管线，不登记）
-        if not Config.llm_enabled:
+        # 直接输出路径登记 last_case，供「标记上一条」热键/菜单使用。
+        # （编辑框路径进入分支后已 return，不会走到这里；LLM 路径有自己的管线，
+        # 不登记；无效条不登记--「上一条」保持为最新一条合法条。）
+        # 边界口径：非编辑框模式下，能算「上一条」的分界线是写入剪贴板
+        # （_emit_text 已完成，此处紧随其后）。
+        if not Config.llm_enabled and not invalid_case:
             import datetime as _dt0
             self.state.editor_last_case = {
                 'ts': _dt0.datetime.now().isoformat(timespec='seconds'),
@@ -398,10 +424,11 @@ class ResultProcessor:
                 'time_start': message.time_start,
                 'raw_text': original_text,
                 'final_text': text,
+                'recording_duration': recording_duration,
                 # 音频此时已按最终文本重命名归档，直接指向归档路径（标记时再拷贝）
                 'audio_src': str(file_audio) if file_audio else None,
                 'source_app': getattr(self.state, 'paste_target', None),
-                'mode': 'direct', 'marked': False,
+                'mode': 'direct', 'kind': 'direct', 'marked': False,
             }
 
         # 检测修饰键状态（调试用）
@@ -434,7 +461,8 @@ class ResultProcessor:
         return file_audio
 
     async def _editor_confirmed(self, case: dict, final_text: str, file_path_pending) -> None:
-        """编辑框 Enter 确认：改名/日记 -> 存标注(corrected) -> 恢复目标应用 -> 上屏。"""
+        """编辑框 Enter 确认：改名/日记 -> 存标注(corrected) -> 登记上一条(kind=已确认)
+        -> 恢复目标应用 -> 上屏。"""
         from core.client.output.edit_panel import activate_app_sync
         # message 在回调里不可得，time_start 随 case 传入；缺失时退回当前时间
         time_start = case.get('time_start') or time.time()
@@ -445,36 +473,46 @@ class ResultProcessor:
             if audio_src is None and case.get('audio_src'):
                 audio_src = Path(case['audio_src'])
             self.app.annotation.record(
-                dict(case, status='corrected', final_text=final_text),
+                dict(case, status='corrected', final_text=final_text,
+                     kind='editor_confirmed'),
                 audio_src=audio_src,
             )
-            # 回填 last_case 供「标记上一条」使用（同一 task 才回填，防与新案例串扰）
-            last = getattr(self.state, 'editor_last_case', None)
-            if last and last.get('task_id') == case.get('task_id'):
-                last['final_text'] = final_text
-                last['audio_src'] = str(file_audio) if file_audio else last.get('audio_src')
+            # 面板已被 Enter 关闭：此刻起本条才算「上一条」（kind=editor_confirmed，
+            # 标记它 = 标记「真值不可靠」）
+            self.state.editor_last_case = dict(
+                case, final_text=final_text, kind='editor_confirmed', marked=False,
+                audio_src=str(file_audio) if file_audio else case.get('audio_src'))
             # 先把焦点还给用户当初说话的应用，再粘贴上屏（编辑框刚才抢占过前台焦点）
             activate_app_sync(getattr(self.state, 'paste_target', None))
             await self._emit_text(final_text, paste=True)
         except Exception as e:
             logger.error(f"[editor] 确认回调处理失败: {e}", exc_info=True)
 
-    async def _editor_canceled(self, case: dict, file_path_pending) -> None:
-        """编辑框 Esc 取消：不上屏，但按「有问题、未纠正」留存标注（音频/原识别保留）。"""
+    async def _editor_canceled(self, case: dict, file_path_pending, panel_text: str) -> None:
+        """编辑框 Esc 放弃（2026-08-24 口径）：
+        - 不写标注数据集（等同该条没开编辑框模式）
+        - 音频照常归档、日记照常写（既有基础设施不动）
+        - 面板文本非空则写入剪贴板，但不自动上屏（TextOutput.output 在 Darwin
+          强制 paste=True，故直接用 clipboard.safe_copy）
+        - 面板已被 Esc 关闭：登记上一条（kind=editor_canceled，只有 raw，
+          标记它 = 标记「转录有误」）
+        """
         time_start = case.get('time_start') or time.time()
         try:
-            raw_text = case.get('raw_text') or ''
-            file_audio = self._save_audio_and_diary(raw_text, time_start, file_path_pending)
-            audio_src = file_audio
-            if audio_src is None and case.get('audio_src'):
-                audio_src = Path(case['audio_src'])
-            self.app.annotation.record(
-                dict(case, status='problem', final_text=None),
-                audio_src=audio_src,
-            )
-            logger.info(f"[editor] 用户取消上屏，已留存问题案例 task={case.get('task_id')}")
+            text = (panel_text or '').strip()
+            file_audio = self._save_audio_and_diary(
+                text or (case.get('raw_text') or ''), time_start, file_path_pending)
+            if text:
+                from core.client.clipboard.clipboard import safe_copy
+                if safe_copy(text):
+                    self.state.set_output_text(text)
+                    logger.info(f"[editor] 已放弃上屏，转录已写入剪贴板 task={case.get('task_id')}")
+            self.state.editor_last_case = dict(
+                case, final_text=None, kind='editor_canceled', marked=False,
+                audio_src=str(file_audio) if file_audio else case.get('audio_src'))
+            logger.info(f"[editor] 用户放弃本条（不入标注库）task={case.get('task_id')}")
         except Exception as e:
-            logger.error(f"[editor] 取消回调处理失败: {e}", exc_info=True)
+            logger.error(f"[editor] 放弃回调处理失败: {e}", exc_info=True)
 
     def _cleanup(self) -> None:
         """清理资源"""
