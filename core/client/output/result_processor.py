@@ -416,7 +416,10 @@ class ResultProcessor:
         # 不登记；无效条不登记--「上一条」保持为最新一条合法条。）
         # 边界口径：非编辑框模式下，能算「上一条」的分界线是写入剪贴板
         # （_emit_text 已完成，此处紧随其后）。
-        if not Config.llm_enabled and not invalid_case:
+        # TextOutput.output 对空文本会直接返回，既不写剪贴板也不上屏；因此后处理
+        # （去末尾标点/规则替换）得到空串时，不能越过“写入剪贴板后才算上一条”的
+        # 直接输出边界，更不能用空结果覆盖用户仍可标记的旧案例。
+        if not Config.llm_enabled and not invalid_case and text:
             import datetime as _dt0
             self.state.editor_last_case = {
                 'ts': _dt0.datetime.now().isoformat(timespec='seconds'),

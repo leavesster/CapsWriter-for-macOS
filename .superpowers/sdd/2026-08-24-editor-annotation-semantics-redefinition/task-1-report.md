@@ -86,3 +86,113 @@ editor 结果流全部断言通过 ✅
 ## 关注点
 
 - 新结果流脚本为隔离单元回归，使用最小依赖替身绕过当前环境缺失的可选 `pyclip` 和 `sounddevice`；真实 macOS 面板、系统剪贴板和音频设备的用户级验收仍由 Task 3 执行。
+
+---
+
+## 修复轮 1（评审 finding 修复）
+
+### 修复内容
+
+- `core/client/output/annotation_store.py`
+  - `editor_confirmed` 的标记 status 现在只由 `kind == 'editor_confirmed'` 决定，不再要求 `final_text` 为真值。
+  - 用户清空编辑框后 Enter 时，后续标记会正确写入 `final_unreliable`，保存空 `final_text`；通知摘要仍按“final 优先、为空则 raw”回退。
+- `core/client/output/result_processor.py`
+  - direct 路径只有在后处理后的 `text` 非空时才登记 `editor_last_case`。
+  - 这与 `TextOutput.output()` 对空文本直接 return 的行为一致，避免“未写剪贴板”却覆盖上一条可标记案例。
+
+### 新增回归
+
+- `tools/test_editor_annotation.py`
+  - 新增 `editor_confirmed + final_text=''`：断言落盘 `final_unreliable`、保留空 final、通知从 raw 摘录。
+- `tools/test_editor_result_flow.py`
+  - 新增后处理为空的 direct：断言 `_emit_text('', ...)` 后旧 `editor_last_case` 保持不变且不发生新的 last_case 登记。
+
+### RED 证据
+
+命令：
+
+```text
+python tools/test_editor_annotation.py
+python tools/test_editor_result_flow.py
+```
+
+修改前完整输出（两条命令均退出码 `1`）：
+
+```text
+annotation_store 标注落盘测试：
+  case_record_and_copy: PASS
+  case_record_no_audio: PASS
+  case_invalid_filtered: PASS
+Traceback (most recent call last):
+  File "tools/test_editor_annotation.py", line 289, in <module>
+    main()
+  File "tools/test_editor_annotation.py", line 281, in main
+    case_mark_last_problem(tmp / 's4')
+  File "tools/test_editor_annotation.py", line 188, in case_mark_last_problem
+    assert e['status'] == 'final_unreliable' and e['final_text'] == '', e
+AssertionError: {'ts': '2026-08-23T12:02:30', 'task_id': 'tid-0003-empty-final', 'status': 'raw_unreliable', 'raw_text': '用户清空前的原始转录', 'final_text': None, 'recording_duration': 5.0, 'source_app': None, 'mode': 'editor', 'kind': 'editor_confirmed', 'audio_file': 'audio/20260823T120230_tid-0003.mp3'}
+
+  case_invalid_short_text_direct_and_keeps_last: PASS
+  case_invalid_empty_keeps_last: PASS
+  case_unknown_empty_enters_editor: PASS
+  case_direct_registers_after_emit: PASS
+Traceback (most recent call last):
+  File "tools/test_editor_result_flow.py", line 299, in <module>
+    asyncio.run(main())
+  File "tools/test_editor_result_flow.py", line 292, in main
+    await case_direct_empty_after_processing_keeps_last()
+  File "tools/test_editor_result_flow.py", line 243, in case_direct_empty_after_processing_keeps_last
+    assert app.state.editor_last_case is old_case, '未写剪贴板的空结果不得覆盖旧 editor_last_case'
+AssertionError: 未写剪贴板的空结果不得覆盖旧 editor_last_case
+```
+
+### GREEN 证据
+
+命令：
+
+```text
+python tools/test_editor_annotation.py
+python tools/test_editor_result_flow.py
+python -m py_compile core/client/output/annotation_store.py core/client/output/result_processor.py tools/test_editor_annotation.py tools/test_editor_result_flow.py
+```
+
+完整输出（全部退出码 `0`；`py_compile` 成功时无 stdout）：
+
+```text
+annotation_store 标注落盘测试：
+  case_record_and_copy: PASS
+  case_record_no_audio: PASS
+  case_invalid_filtered: PASS
+  case_mark_last_problem: PASS
+[08/24/26 20:53:21] ERROR 标注落盘失败（不影响正常输出流程）: [Errno 20] Not a directory: '.../blocker/evals/manual_cases/audio'
+[08/24/26 20:53:21] ERROR 标注落盘失败（不影响正常输出流程）: [Errno 20] Not a directory: '.../blocker/evals/manual_cases/audio'
+  case_record_error_swallowed: PASS
+annotation_store 全部断言通过 ✅
+
+    转录时延：1.00s
+    识别结果：嗯
+    录音时间过短或为空，本条不计入标注系统
+    转录时延：1.00s
+    识别结果：啊
+    录音时间过短或为空，本条不计入标注系统
+  case_invalid_short_text_direct_and_keeps_last: PASS
+    转录时延：1.00s
+    识别结果：
+    录音时间过短或为空，本条不计入标注系统
+  case_invalid_empty_keeps_last: PASS
+    转录时延：1.00s
+    识别结果：
+  case_unknown_empty_enters_editor: PASS
+    转录时延：1.00s
+    识别结果：直接输出
+  case_direct_registers_after_emit: PASS
+    转录时延：1.00s
+    识别结果：
+  case_direct_empty_after_processing_keeps_last: PASS
+  case_editor_confirmed_order: PASS
+  case_editor_canceled_clipboard_only: PASS
+editor 结果流全部断言通过 ✅
+
+python -m py_compile ...
+（无 stdout，退出码 0）
+```

@@ -170,6 +170,25 @@ def case_mark_last_problem(tmp: Path):
     msg = app.error_bus.msgs[-1][0]
     assert '真值不可靠' in msg and '用户纠正后的真值'[:10] in msg, msg
 
+    # 即使用户清空编辑框再 Enter，该条仍是 editor_confirmed：标记语义只由
+    # kind 决定，必须写 final_unreliable；通知因空 final 回退摘录 raw。
+    app.state.editor_last_case = {
+        'ts': '2026-08-23T12:02:30',
+        'task_id': 'tid-0003-empty-final',
+        'raw_text': '用户清空前的原始转录',
+        'final_text': '',
+        'recording_duration': 5.0,
+        'audio_src': str(src),
+        'source_app': None,
+        'mode': 'editor', 'kind': 'editor_confirmed',
+    }
+    r_empty_final = svc.mark_last_problem()
+    assert r_empty_final['ok'] is True, f'实际 {r_empty_final}'
+    e = json.loads(svc.jsonl_path.read_text(encoding='utf-8').strip().splitlines()[-1])
+    assert e['status'] == 'final_unreliable' and e['final_text'] == '', e
+    msg = app.error_bus.msgs[-1][0]
+    assert '真值不可靠' in msg and '用户清空前的原始转录' in msg, msg
+
     # 重复标记 -> 去重
     r2 = svc.mark_last_problem()
     assert r2['ok'] is False and r2['reason'] == 'already_marked'

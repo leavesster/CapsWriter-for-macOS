@@ -133,7 +133,10 @@ class AnnotationService:
             return {'ok': False, 'reason': 'already_marked'}
 
         kind = case.get('kind', 'direct')
-        if kind == 'editor_confirmed' and case.get('final_text'):
+        # Enter 已关闭编辑框就确定为 editor_confirmed；用户可以主动清空文本后确认，
+        # 此时 final_text 为空也不能改变其“真值不可靠”的标记语义。通知摘录仍在
+        # 下方按空 final 回退 raw，但 status 的判断绝不能依赖文本是否为真值。
+        if kind == 'editor_confirmed':
             status = 'final_unreliable'
             final_text = case.get('final_text')
             notify_msg = '已标记上一条真值不可靠'

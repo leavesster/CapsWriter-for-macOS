@@ -223,6 +223,28 @@ async def case_direct_registers_after_emit():
     print('  case_direct_registers_after_emit: PASS')
 
 
+async def case_direct_empty_after_processing_keeps_last():
+    """后处理文本为空时输出层不会写剪贴板，不能把该条登记为 direct。"""
+    processor, app = await _new_processor()
+    old_case = {'task_id': 'old-after-processing', 'kind': 'direct', 'marked': False}
+    app.state.editor_last_case = old_case
+    app.state.events.clear()
+    _set_trace(app.state, 'direct-empty', 2.5)
+
+    # 模拟 strip_punc/规则替换后只剩空串；真实 TextOutput.output 会对它直接 return，
+    # 本隔离测试只验证调用方不会越过“写入剪贴板后才算上一条”的登记边界。
+    with patch.multiple(Config, editor_mode=False, llm_enabled=False, save_audio=False,
+                        hot=False), \
+            patch('core.client.output.result_processor.TextOutput.strip_punc', return_value=''), \
+            patch('core.client.output.result_processor.get_active_window_info', return_value={}):
+        await processor._handle_message(_message('direct-empty', '只剩标点'))
+
+    processor._emit_text.assert_awaited_once_with('', paste=Config.paste)
+    assert app.state.editor_last_case is old_case, '未写剪贴板的空结果不得覆盖旧 editor_last_case'
+    assert app.state.events == [], app.state.events
+    print('  case_direct_empty_after_processing_keeps_last: PASS')
+
+
 async def case_editor_confirmed_order():
     """Enter：先 corrected 落盘，再登记，再恢复焦点，最后强制 paste 上屏。"""
     processor, app = await _new_processor()
@@ -267,6 +289,7 @@ async def main():
     await case_invalid_empty_keeps_last()
     await case_unknown_empty_enters_editor()
     await case_direct_registers_after_emit()
+    await case_direct_empty_after_processing_keeps_last()
     await case_editor_confirmed_order()
     await case_editor_canceled_clipboard_only()
     print('editor 结果流全部断言通过 ✅')
