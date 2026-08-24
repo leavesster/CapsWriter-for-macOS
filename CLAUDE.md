@@ -1,5 +1,15 @@
 # CapsWriter-Offline 当前阶段同步
 
+## 2026-08-24 自主执行恢复状态（8 月 25 日续）
+
+- 当前核心目标：完成「编辑框标注行为口径（2026-08-24 用户重新声明）」的实现、逐任务评审与真实用户路径验收。
+- 恢复依据：8 月 23 日旧计划仅作为历史账本；8 月 24 日重定义的 Task 1–7 已分别提交并通过当时的定向验证。随后真机验收发现 Esc 错误推进指针、⌃⌥M 未被原生吞键、面板纵向位置不符合预期，现由主会话按最终口径纠偏。
+- 执行计划：`docs/superpowers/plans/2026-08-24-editor-annotation-semantics-redefinition.md`。
+- **标注数据 v2 口径（2026-08-24 用户确认）**：新系统只写 `evals/manual_cases/v2/cases.jsonl` 与 `v2/audio/`，每条固定 `annotation_version: 2`；旧 `evals/manual_cases/cases.jsonl` 与旧音频不迁移、不改写，缺版本字段一律视作 v1。后续评测默认只选择 v2，避免把旧的低可信数据混入新版高可信数据集。
+- 当前状态：🟡 v2 数据隔离、结果流稳健性与并发标记已完成；真机验收暴露的 Esc 指针、原生热键吞键和面板纵向定位纠偏已进入主会话收尾，待 fresh 自动验证、客户端重启与完整用户路径复验。
+
+---
+
 ## 当前目标
 
 - 分支：`mac-dev`，基线：`master`
@@ -42,6 +52,7 @@ launchd
 | 用户心智 | 运维层透明（只操作 CapsWriter 整体）；故障层用「识别引擎」指代 server |
 | 菜单栏 GUI | 采用**自定义矢量 mark**（"会说话的⇪"：气泡 + 波形 + Caps Lock）作菜单栏 template，**放弃** SF Symbols `waveform`；NSImage 原生读 SVG（`_NSSVGImageRep` 矢量，任意倍率清晰）+ `isTemplate` 深 / 浅色自适应 + `autosaveName` 固定位置；旧系统（<13）@2x PNG 兜底。**下拉菜单已落地**（见任务 M8）：纯原生 `NSMenu`+`NSMenuItem`（无自定义视图，自动继承系统 Liquid Glass 材质 + 深浅色自适应），SF Symbol 模板图标。五项：状态表头(禁用，按 ErrorBus 快照刷新) / 复制最近结果(无结果置灰) / 编辑热词(open -t hot.txt) / 重启 CapsWriter(=`capswriter restart`) / 退出 CapsWriter(=`capswriter stop`) |
 | 显示名称 | `CapsWriter for macOS` |
+| **编辑框标注行为口径（2026-08-24 用户重新声明；真机验收纠偏后现行唯一口径）** | **先分清两个概念**：数据集落盘与内存中的“可标记上一条”指针不是一回事。指针只有 `editor_confirmed`、`direct` 两种；落盘 status 只有 `corrected`、`final_unreliable`、`raw_unreliable` 三种。**编辑框 Enter**：确认关闭后立即把指针推进为 `editor_confirmed`；自动写一条 raw+用户确认 final 的 `corrected`；恢复录音开始时的目标应用并上屏。之后菜单与 ⌃⌥M 表示“标记上一条真值不可靠”，显式标记时追加 `final_unreliable`。**编辑框 Esc**：该条彻底不进入标注域——不落任何数据、不创建任何指针类型、不移动既有指针；Esc 后 ⌃⌥M 仍命中 Esc 之前最近的合法 Enter/direct 条。面板文本非空时只写剪贴板、不自动上屏；清空后不覆盖剪贴板；两者都恢复录音开始时的目标应用，音频/日记/归档既有链路继续执行。**非编辑框 direct**：默认绝不写入数据集；只有成功写入剪贴板后才把指针推进为 `direct`。之后菜单与 ⌃⌥M 表示“标记上一条转录有误”，显式标记时才写 raw-only `raw_unreliable`。**无效条与待编辑条**：都不落数据、不推进指针；无效条只由时长规则判定并保留既有输出/音频/日记链路，框内等待编辑的内容也不叫上一条。**热键**：固定 ⌃⌥M，由 macOS active event tap 吞掉 keyDown/keyUp 后异步执行，禁止透传导致系统错误音或特殊字符。**菜单**：完全由当前指针类型决定标题与动作；无指针时禁用；Esc、无效条、待编辑均不得改变菜单语义。**编辑框 UI**：面板只有编辑区域，按宽度自动换行；Enter 确认，Shift+Enter 插入换行；高度自适应并设上限，超限后可滚动；窗口水平居中、纵向靠上，顶部边界固定，高度只向下增长或从底部缩回；面板打开期间长按 Caps 不启动新录音。**通知**：标记成功通知显示被标记条的文本摘录，有 final 优先 final，否则 raw。新版记录只写 v2。 |
 | 信号处理 | SIGTERM：set_wakeup_fd + SigtermWatcher 守护线程（NSApp.run() C RunLoop 期间 Python signal handler 无法执行）→ _critical_cleanup() → os._exit(0)；SIGINT 双击确认 |
 | 流式识别策略 | 当前阶段**不**把“产品级流式识别 / 流式显示”作为优先目标。Qwen3-ASR 的 decoder 虽具备自回归逐 token 输出能力，但要做成稳定的端到端流式体验仍需额外的 chunking、稳定前缀/不稳定尾巴管理与中间结果提交策略；现阶段先聚焦最终结果精度 |
 | MLX 后端演进路线 | 当前 `qwen_asr_mlx` 只是一层最小适配，后续精度优化主路线改为：**fork `mlx-qwen3-asr`，接管中层推理编排**（prompt 组装、language/context 策略、generation config、chunking、aligner 接法），而非继续把 `Session.transcribe()` 作为黑盒 |
@@ -96,6 +107,7 @@ launchd
 | **P2：Unix socket 实时推送** | 🔲 待实施（GUI 阶段） | CLI 实时订阅 .app 事件流 |
 | launchd 端到端测试 | 🔲 待测试 | 重启验证开机自启 |
 | FFmpeg 路径确认 | ✅ 2026-08-14 已修复+实测 | 根因：launchd 默认 PATH 是最小集（`/usr/bin:/bin:/usr/sbin:/sbin`），不含 Homebrew 的 ffmpeg → `AudioFileManager` 靠 `shutil.which('ffmpeg')` 判定，PATH 无 ffmpeg 时静默降级存 WAV（体积约为 192k MP3 的 5~6 倍）。修法：`capswriter.py:_build_client_plist()` 给 client plist 加 `EnvironmentVariables PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`；`uninstall→install` 重写 plist 生效。实测：新 client 进程 PATH 含 ffmpeg，`shutil.which` 命中 `/opt/homebrew/bin/ffmpeg`，新录音 ffprobe 验证为真 MP3（codec=mp3，~195kbps，48k/单声道）。TCC 权限不受影响（未重签 launcher）。 |
+| **T4：编辑框标注系统** | 🟡 8 月 24 日重定义主体已实现；真机纠偏待复验 | **现行实现边界**：新标注只写 `evals/manual_cases/v2/` 并固定 `annotation_version=2`，旧 v1 不迁移、不混用。Enter 自动写 `corrected` 并发布 `editor_confirmed` 指针；direct 默认不入库，只在剪贴板输出成功后发布 `direct` 指针；显式标记分别写 `final_unreliable` / `raw_unreliable`。Esc、无效条和框内待编辑状态均不落数据、不推进指针。菜单标题与动作只由这两个指针类型决定，无指针时禁用。真机已确认通知横幅恢复正常；本轮待复验项为：Esc 后仍标记前一合法条、⌃⌥M 被 active event tap 完整吞键且无系统错误音、面板纵向靠上且固定顶部向下伸缩。完整口径与路径证据见本文件决策表、当前计划及自主验收记录。 |
 
 ---
 
