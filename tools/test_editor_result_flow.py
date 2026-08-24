@@ -296,11 +296,33 @@ async def case_macos_paste_permission_failure_keeps_copy_success():
     failed_paste = type('_Result', (), {'returncode': 1, 'stderr': b'not allowed'})()
     with patch('core.client.clipboard.clipboard.platform.system', return_value='Darwin'), \
             patch('core.client.clipboard.clipboard.safe_copy', return_value=True), \
+            patch('core.client.clipboard.clipboard._post_macos_paste_shortcut',
+                  return_value=False), \
             patch('core.client.clipboard.clipboard.subprocess.run', return_value=failed_paste):
         copied = await clipboard.paste_text('可手动粘贴', restore_clipboard=False)
 
     assert copied is True
     print('  case_macos_paste_permission_failure_keeps_copy_success: PASS')
+
+
+async def case_macos_native_paste_has_no_fixed_wait():
+    """macOS 正常路径必须走进程内 Quartz，不能再启动 osascript 或固定 sleep。"""
+    from core.client.clipboard import clipboard
+
+    with patch('core.client.clipboard.clipboard.platform.system', return_value='Darwin'), \
+            patch('core.client.clipboard.clipboard.safe_copy', return_value=True), \
+            patch('core.client.clipboard.clipboard._post_macos_paste_shortcut',
+                  return_value=True) as native_paste, \
+            patch('core.client.clipboard.clipboard.subprocess.run') as run, \
+            patch('core.client.clipboard.clipboard.asyncio.sleep',
+                  new_callable=AsyncMock) as sleep:
+        copied = await clipboard.paste_text('立即上屏', restore_clipboard=True)
+
+    assert copied is True
+    native_paste.assert_called_once_with()
+    run.assert_not_called()
+    sleep.assert_not_awaited()
+    print('  case_macos_native_paste_has_no_fixed_wait: PASS')
 
 
 async def case_emit_failure_skips_state_and_udp():
@@ -488,6 +510,7 @@ async def main():
     await case_direct_empty_after_processing_keeps_last()
     await case_paste_copy_failure_does_not_send_paste()
     await case_macos_paste_permission_failure_keeps_copy_success()
+    await case_macos_native_paste_has_no_fixed_wait()
     await case_emit_failure_skips_state_and_udp()
     await case_direct_emit_failure_keeps_last()
     await case_editor_confirmed_order()

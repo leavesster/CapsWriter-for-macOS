@@ -59,6 +59,8 @@ _active = False             # 面板是否打开（主线程读写，读侧仅�
 _pending = False            # present_editor 已派发但 show_panel 尚未执行（跨线程窗口）
 _pending_since = None       # _pending 置位时刻（time.monotonic()），用于看门狗判定派发丢失
 _PENDING_TIMEOUT = 5.0      # 秒：超过视为 callAfter 派发丢失，自动复位
+_ACTIVATE_TIMEOUT = 0.08    # 秒：仅在目标应用尚未激活时短暂轮询，不再固定等待 250ms
+_ACTIVATE_POLL = 0.005      # 秒：检测到目标已激活就立即继续上屏
 
 
 def editor_command(selector: str, *, shift_pressed: bool = False) -> Optional[str]:
@@ -159,7 +161,7 @@ def present_editor(text: str, on_confirm: Callable[[str], None],
 
 
 def activate_app_sync(target: Optional[dict]) -> None:
-    """把焦点交还给按下 Caps 时的前台应用。在客户端事件循环线程调用（阻塞 ~0.25s）。"""
+    """请求恢复目标应用；检测到激活即返回，最多等待 80ms 异常兜底。"""
     if not _APPKIT_OK or not target:
         return
     pid = int(target.get('pid', -1))
@@ -173,8 +175,12 @@ def activate_app_sync(target: Optional[dict]) -> None:
             return
         AppHelper.callAfter(
             app.activateWithOptions_, NSApplicationActivateIgnoringOtherApps)
-        # 等 activate 生效再粘贴（粘贴靠目标应用处于前台接收 Cmd+V）
-        time.sleep(0.25)
+        # AppHelper 只负责把激活动作送到主线程。旧实现无条件 sleep 250ms，
+        # 即使应用已瞬间激活也要干等；现在只在尚未 active 时按 5ms 轮询，
+        # 正常情况检测到目标已接管焦点就立即返回。
+        deadline = time.monotonic() + _ACTIVATE_TIMEOUT
+        while not app.isActive() and time.monotonic() < deadline:
+            time.sleep(_ACTIVATE_POLL)
     except Exception as e:
         logger.warning(f"[editor] 恢复目标应用焦点失败: {e}")
 
