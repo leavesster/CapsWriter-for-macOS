@@ -2,10 +2,10 @@
 """
 macOS 原生编辑框面板（PyObjC，2026-08-23 创建，2026-08-24 UI 重做）
 
-编辑框模式：Caps 长按识别完成后，结果先进本面板；Enter=确认（先存标注、再恢复
-按下 Caps 时的前台应用并粘贴上屏），Esc=放弃（不入标注库；非空转录写剪贴板但
-不自动上屏，由 result_processor 落实）。面板打开期间 shortcut_manager 抑制新
-录音触发。
+编辑框模式：Caps 长按识别完成后，结果先进本面板；Enter=确认（先恢复按下 Caps
+时的前台应用并粘贴上屏，再做音频/日记/标注持久化），Esc=放弃（不入标注库；
+非空转录写剪贴板但不自动上屏，由 result_processor 落实）。面板打开期间
+shortcut_manager 抑制新录音触发。
 
 UI（2026-08-24 口径）：面板基本只有一个编辑框——borderless 窗口 + 毛玻璃圆角
 底（NSVisualEffectView）；NSTextView 按宽度自动换行（自动换行与模型输出中的

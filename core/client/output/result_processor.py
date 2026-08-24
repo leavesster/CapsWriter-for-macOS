@@ -520,17 +520,31 @@ class ResultProcessor:
         self.state.editor_last_case = dict(current, audio_src=str(file_audio))
 
     async def _editor_confirmed(self, case: dict, final_text: str, file_path_pending) -> None:
-        """编辑框 Enter 确认：立即发布上一条，再分项执行归档、标注、恢复与上屏。"""
+        """编辑框 Enter：立即发布上一条并优先上屏，随后完成旁路持久化。"""
         from core.client.output.edit_panel import activate_app_sync
         # message 在回调里不可得，time_start 随 case 传入；缺失时退回当前时间
         time_start = case.get('time_start') or time.time()
         self._publish_editor_last_case(
             case, final_text=final_text, kind='editor_confirmed')
+
+        # 用户可见动作必须排在磁盘 I/O 前。音频重命名、日记追加和 v2 音频复制
+        # 在真实机器上可能累计超过一秒，但都不应阻塞 Enter 到上屏的反馈。
+        try:
+            activate_app_sync(case.get('source_app'))
+        except Exception as e:
+            logger.error(f"[editor] 恢复目标应用失败（继续上屏）: {e}", exc_info=True)
+        try:
+            await self._emit_text(final_text, paste=True)
+        except Exception as e:
+            # 即使用户可见输出失败，corrected 数据仍需尽力持久化，便于追踪问题。
+            logger.error(f"[editor] 确认文本输出失败（继续持久化）: {e}", exc_info=True)
+
+        # 以下均为上屏后的旁路持久化；任一失败不得反向影响已经完成的用户动作。
         file_audio = None
         try:
             file_audio = self._save_audio_and_diary(final_text, time_start, file_path_pending)
         except Exception as e:
-            logger.error(f"[editor] 确认后归档失败（继续标注与上屏）: {e}", exc_info=True)
+            logger.error(f"[editor] 确认后归档失败（继续标注）: {e}", exc_info=True)
         if file_audio:
             self._backfill_last_case_audio(case.get('task_id'), file_audio)
         # 标注音频优先用重命名后的归档路径；改名失败时退回待处理临时路径。
@@ -544,16 +558,7 @@ class ResultProcessor:
                 audio_src=audio_src,
             )
         except Exception as e:
-            logger.error(f"[editor] corrected 标注写入失败（继续上屏）: {e}", exc_info=True)
-        # 先把焦点还给用户当初说话的应用，再粘贴上屏；二者也分别容错。
-        try:
-            activate_app_sync(case.get('source_app'))
-        except Exception as e:
-            logger.error(f"[editor] 恢复目标应用失败（继续上屏）: {e}", exc_info=True)
-        try:
-            await self._emit_text(final_text, paste=True)
-        except Exception as e:
-            logger.error(f"[editor] 确认文本输出失败: {e}", exc_info=True)
+            logger.error(f"[editor] corrected 标注写入失败（上屏已完成）: {e}", exc_info=True)
 
     async def _editor_canceled(self, case: dict, file_path_pending, panel_text: str) -> None:
         """编辑框 Esc 放弃（2026-08-24 口径）：

@@ -7,6 +7,7 @@
 - 执行计划：`docs/superpowers/plans/2026-08-24-editor-annotation-semantics-redefinition.md`。
 - **标注数据 v2 口径（2026-08-24 用户确认）**：新系统只写 `evals/manual_cases/v2/cases.jsonl` 与 `v2/audio/`，每条固定 `annotation_version: 2`；旧 `evals/manual_cases/cases.jsonl` 与旧音频不迁移、不改写，缺版本字段一律视作 v1。后续评测默认只选择 v2，避免把旧的低可信数据混入新版高可信数据集。
 - 当前状态：🟡 真机纠偏已提交 `5249253`；自动验证全部 fresh 通过。2026-08-25 用户已实测确认核心状态机：编辑框确认条可标记为真值不可靠，Esc 不污染上一条，关闭编辑框后的 direct 条可按转录有误标记，⌃⌥M 可正常完成两类标记。尚待验收的是 Shift+Enter、长文本滚动与固定顶部向下伸缩等其余 UI 路径。
+- **Enter 上屏时延口径（2026-08-25 用户新增）**：按下 Enter 后必须优先完成用户可见动作，顺序固定为“同步发布 `editor_confirmed` 指针 → 恢复原目标应用 → 立即写剪贴板并上屏 → 音频归档/日记/`corrected` v2 落盘”。持久化仍必须完成并保持失败隔离，但不得再阻塞上屏。
 
 ---
 

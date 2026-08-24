@@ -339,7 +339,7 @@ async def case_direct_emit_failure_keeps_last():
 
 
 async def case_editor_confirmed_order():
-    """Enter：先发布上一条，再落 corrected、恢复焦点并强制 paste 上屏。"""
+    """Enter：先发布上一条并立即恢复/上屏，慢归档与 corrected 落盘必须后置。"""
     processor, app = await _new_processor()
     events = app.state.events
 
@@ -347,7 +347,11 @@ async def case_editor_confirmed_order():
         events.append(('emit', text, paste))
 
     processor._emit_text.side_effect = _emit
-    processor._save_audio_and_diary = lambda *args: None
+    def _persist(*_args):
+        events.append('persist')
+        return None
+
+    processor._save_audio_and_diary = _persist
     case = {'task_id': 'confirm', 'raw_text': '原文', 'time_start': 10.0, 'mode': 'editor'}
     with patch('core.client.output.edit_panel.activate_app_sync',
                side_effect=lambda target: events.append('activate')):
@@ -355,7 +359,9 @@ async def case_editor_confirmed_order():
 
     assert app.annotation.records[0][0]['status'] == 'corrected'
     assert app.annotation.records[0][0]['kind'] == 'editor_confirmed'
-    assert events == ['last_case', 'record', 'activate', ('emit', '修正后', True)], events
+    assert events == [
+        'last_case', 'activate', ('emit', '修正后', True), 'persist', 'record'
+    ], events
     assert app.state.editor_last_case['kind'] == 'editor_confirmed'
     print('  case_editor_confirmed_order: PASS')
 

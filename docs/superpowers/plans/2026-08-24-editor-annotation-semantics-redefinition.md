@@ -313,6 +313,19 @@
 
   Commit: `docs(macos/editor): 记录 8 月 24 日口径验收结果`
 
+---
+
+### Task 10: 优化 Enter 到上屏的用户可见时延
+
+**Files:**
+- Modify: `core/client/output/result_processor.py`
+- Modify: `tools/test_editor_result_flow.py`
+- Modify: `CLAUDE.md`
+
+- [x] 先补 RED：确认回调仍同步发布 `editor_confirmed`；异步处理顺序必须为恢复目标应用、`_emit_text(..., paste=True)`、音频/日记归档、`corrected` v2 记录。
+- [x] 最小调整 `_editor_confirmed` 顺序；上屏失败仍继续持久化，归档/标注失败不得反向影响已经完成的上屏。
+- [ ] 运行结果流测试、UI 契约测试、编译与差异检查；提交并重启真实客户端复测 Enter 体感时延。
+
 ## Self-Review 结论
 
 - Spec 覆盖：无效条、Enter/Esc、两种指针类型、三种落盘 status、direct 默认不入库、通知摘录、原生吞键热键、菜单动态文案、面板 UI 与固定顶部伸缩均有对应任务。
