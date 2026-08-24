@@ -361,10 +361,13 @@ async def case_editor_confirmed_order():
 
 
 async def case_editor_callbacks_publish_before_dispatch():
-    """Enter/Esc 的同步回调必须先发布上一条，再把慢 I/O 协程派发出去。"""
-    for action, expected_kind in (('confirm', 'editor_confirmed'),
-                                  ('cancel', 'editor_canceled')):
+    """Enter 立即发布；Esc 只派发清理协程，必须保留此前可标记上一条。"""
+    for action, expected_kind in (('confirm', 'editor_confirmed'), ('cancel', 'direct')):
         processor, app = await _new_processor()
+        previous = {'task_id': 'previous', 'kind': 'direct', 'marked': False}
+        if action == 'cancel':
+            app.state.editor_last_case = previous
+            app.state.events.clear()
         held_coroutines = []
 
         def _hold(coro, _loop):
@@ -377,6 +380,8 @@ async def case_editor_callbacks_publish_before_dispatch():
             else:
                 on_cancel('放弃文本')
             assert app.state.editor_last_case['kind'] == expected_kind
+            if action == 'cancel':
+                assert app.state.editor_last_case is previous
             assert held_coroutines, '发布上一条后才应派发异步 I/O'
             return True
 
@@ -411,12 +416,16 @@ async def case_editor_io_failures_do_not_block_output():
 
     processor, app = await _new_processor()
     processor._save_audio_and_diary = Mock(side_effect=OSError('日记失败'))
+    previous = {'task_id': 'before-cancel', 'kind': 'direct', 'marked': False}
+    app.state.editor_last_case = previous
     canceled = {'task_id': 'cancel-io', 'raw_text': '原文', 'time_start': 10.0,
-                'mode': 'editor'}
-    with patch('core.client.clipboard.clipboard.safe_copy', return_value=True) as safe_copy:
+                'mode': 'editor', 'source_app': {'pid': 202}}
+    with patch('core.client.clipboard.clipboard.safe_copy', return_value=True) as safe_copy, \
+            patch('core.client.output.edit_panel.activate_app_sync') as activate:
         await processor._editor_canceled(canceled, None, '仍需复制')
     safe_copy.assert_called_once_with('仍需复制')
-    assert app.state.editor_last_case['task_id'] == 'cancel-io'
+    activate.assert_called_once_with({'pid': 202})
+    assert app.state.editor_last_case is previous
     print('  case_editor_io_failures_do_not_block_output: PASS')
 
 
@@ -434,18 +443,32 @@ async def case_audio_backfill_keeps_newer_last_case():
 
 
 async def case_editor_canceled_clipboard_only():
-    """Esc：不落标注、不自动上屏，非空文本仅复制，并登记 editor_canceled。"""
+    """Esc：非空只复制、清空不覆盖；两者均不落盘、不推进上一条。"""
     processor, app = await _new_processor()
     processor._save_audio_and_diary = lambda *args: None
-    case = {'task_id': 'cancel', 'raw_text': '原文', 'time_start': 10.0, 'mode': 'editor'}
+    previous = {'task_id': 'previous-cancel', 'kind': 'editor_confirmed', 'marked': False}
+    app.state.editor_last_case = previous
+    case = {'task_id': 'cancel', 'raw_text': '原文', 'time_start': 10.0,
+            'mode': 'editor', 'source_app': {'pid': 303}}
 
-    with patch('core.client.clipboard.clipboard.safe_copy', return_value=True) as safe_copy:
+    with patch('core.client.clipboard.clipboard.safe_copy', return_value=True) as safe_copy, \
+            patch('core.client.output.edit_panel.activate_app_sync') as activate:
         await processor._editor_canceled(case, None, '保留在剪贴板')
 
     assert app.annotation.records == [], 'Esc 不得写 annotation.record'
     safe_copy.assert_called_once_with('保留在剪贴板')
     assert processor._emit_text.await_count == 0, 'Esc 不得自动上屏'
-    assert app.state.editor_last_case['kind'] == 'editor_canceled'
+    activate.assert_called_once_with({'pid': 303})
+    assert app.state.editor_last_case is previous
+    assert app.state.output_texts == ['保留在剪贴板']
+
+    # 用户把面板清空后 Esc，不得用空串覆盖现有系统剪贴板；焦点和指针规则不变。
+    with patch('core.client.clipboard.clipboard.safe_copy') as safe_copy_empty, \
+            patch('core.client.output.edit_panel.activate_app_sync') as activate_empty:
+        await processor._editor_canceled(case, None, '')
+    safe_copy_empty.assert_not_called()
+    activate_empty.assert_called_once_with({'pid': 303})
+    assert app.state.editor_last_case is previous
     assert app.state.output_texts == ['保留在剪贴板']
     print('  case_editor_canceled_clipboard_only: PASS')
 

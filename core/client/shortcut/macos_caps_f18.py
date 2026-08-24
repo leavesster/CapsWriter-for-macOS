@@ -35,6 +35,7 @@ class MacOSCapsF18Bridge:
         self._listener = MacOSF18Listener(
             on_down=self._on_down,
             on_up=self._on_up,
+            on_mark_problem=self._mark_last_problem,
             on_tap_failed=self._handle_tap_failed,
         )
         self._recover_lock = threading.Lock()
@@ -196,6 +197,12 @@ class MacOSCapsF18Bridge:
     def _stop_recording(self) -> None:
         """长按结束后，复用现有 `caps_lock` 结束录音路径。"""
         self.app.shortcut.stop_press_to_talk("caps_lock")
+
+    def _mark_last_problem(self) -> None:
+        """由 active event tap 吞掉 ⌃⌥M 后，在工作线程执行统一标记入口。"""
+        annotation = getattr(self.app, 'annotation', None)
+        if annotation is not None:
+            annotation.mark_last_problem()
 
     @staticmethod
     def _toggle_caps_lock() -> None:

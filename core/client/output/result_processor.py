@@ -381,8 +381,8 @@ class ResultProcessor:
                     self.app.loop)
 
             def _on_cancel(panel_text: str):
-                self._publish_editor_last_case(
-                    case_common, final_text=None, kind='editor_canceled')
+                # Esc 只结束当前面板流程，不进入标注系统，也绝不能推进可标记
+                # “上一条”指针；随后标记仍应命中 Esc 之前最近的合法案例。
                 asyncio.run_coroutine_threadsafe(
                     self._editor_canceled(dict(case_common), file_path_pending, panel_text),
                     self.app.loop)
@@ -561,30 +561,32 @@ class ResultProcessor:
         - 音频照常归档、日记照常写（既有基础设施不动）
         - 面板文本非空则写入剪贴板，但不自动上屏（TextOutput.output 在 Darwin
           强制 paste=True，故直接用 clipboard.safe_copy）
-        - 面板已被 Esc 关闭：登记上一条（kind=editor_canceled，只有 raw，
-          标记它 = 标记「转录有误」）
+        - 不推进可标记“上一条”；标注指针保持 Esc 之前的案例
+        - 恢复用户说话时的目标应用焦点
         """
+        from core.client.output.edit_panel import activate_app_sync
         time_start = case.get('time_start') or time.time()
-        self._publish_editor_last_case(
-            case, final_text=None, kind='editor_canceled')
         text = (panel_text or '').strip()
-        file_audio = None
-        try:
-            file_audio = self._save_audio_and_diary(
-                text or (case.get('raw_text') or ''), time_start, file_path_pending)
-        except Exception as e:
-            logger.error(f"[editor] 放弃后归档失败（继续写剪贴板）: {e}", exc_info=True)
-        if file_audio:
-            self._backfill_last_case_audio(case.get('task_id'), file_audio)
+        # 用户可见动作优先：非空先写剪贴板，再恢复原应用；慢归档放到后面，
+        # 但整个路径始终不触碰 editor_last_case。
         try:
             if text:
                 from core.client.clipboard.clipboard import safe_copy
                 if safe_copy(text):
                     self.state.set_output_text(text)
                     logger.info(f"[editor] 已放弃上屏，转录已写入剪贴板 task={case.get('task_id')}")
-            logger.info(f"[editor] 用户放弃本条（不入标注库）task={case.get('task_id')}")
         except Exception as e:
             logger.error(f"[editor] 放弃后写入剪贴板失败: {e}", exc_info=True)
+        try:
+            activate_app_sync(case.get('source_app'))
+        except Exception as e:
+            logger.error(f"[editor] 放弃后恢复目标应用失败: {e}", exc_info=True)
+        try:
+            self._save_audio_and_diary(
+                text or (case.get('raw_text') or ''), time_start, file_path_pending)
+        except Exception as e:
+            logger.error(f"[editor] 放弃后归档失败（不影响剪贴板与焦点）: {e}", exc_info=True)
+        logger.info(f"[editor] 用户放弃本条（不入标注库、不推进上一条）task={case.get('task_id')}")
 
     def _cleanup(self) -> None:
         """清理资源"""

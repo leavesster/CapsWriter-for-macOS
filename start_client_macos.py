@@ -223,7 +223,8 @@ def mark_item_title(editor_last_case: dict | None) -> str:
 
     - 上一条是编辑框 Enter 确认条（kind=editor_confirmed）：
       标记的是「真值不可靠」--该类条目的 final 按 Task 1 统一不可采信，即使为空
-    - 其余（编辑框 Esc 放弃条 / 非编辑框条）：标记的是「转录有误」
+    - 非编辑框 direct 条：标记的是「转录有误」
+    - Esc 不推进指针，因此不会改变本函数下一次读取的案例
 
     这是不读取客户端状态的纯函数，供离线测试固定菜单文案；实时状态读取留在
     `_mark_item_title`，保证菜单每次展开仍以当下的 editor_last_case 为准。
@@ -283,6 +284,11 @@ class _StatusMenuController(NSObject):
         if _menu_mark_item is not None:
             try:
                 _menu_mark_item.setTitle_(_mark_item_title())
+                with _client_lock:
+                    _c = _client
+                _st = getattr(_c, 'state', None) if _c is not None else None
+                _menu_mark_item.setEnabled_(
+                    bool(getattr(_st, 'editor_last_case', None)) if _st is not None else False)
             except Exception as e:
                 _menubar_dbg(f"refresh mark-item title FAILED: {e!r}")
 

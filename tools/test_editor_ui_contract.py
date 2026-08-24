@@ -41,6 +41,14 @@ def _load_pure_function(path: Path, name: str):
 
 
 mark_item_title = _load_pure_function(PROJECT_ROOT / 'start_client_macos.py', 'mark_item_title')
+is_mark_problem_hotkey = _load_pure_function(
+    PROJECT_ROOT / 'core/client/shortcut/macos_f18_listener.py',
+    'is_mark_problem_hotkey',
+)
+panel_origin_y = _load_pure_function(
+    PROJECT_ROOT / 'core/client/output/edit_panel.py',
+    'panel_origin_y',
+)
 
 
 def test_hotkey_and_editor_commands() -> None:
@@ -50,14 +58,35 @@ def test_hotkey_and_editor_commands() -> None:
     assert editor_command('insertNewline:', shift_pressed=True) == 'newline'
     assert editor_command('insertNewlineIgnoringFieldEditor:', shift_pressed=False) is None
     assert editor_command('cancelOperation:', shift_pressed=False) == 'cancel'
+    control, option, command, shift = 0b0001, 0b0010, 0b0100, 0b1000
+    assert is_mark_problem_hotkey(
+        0x2E, control | option, control, option, command, shift)
+    assert not is_mark_problem_hotkey(
+        0x2E, control, control, option, command, shift)
+    assert not is_mark_problem_hotkey(0x2E, control | option | command,
+                                      control, option, command, shift)
+    assert not is_mark_problem_hotkey(0x2E, control | option | shift,
+                                      control, option, command, shift)
+    assert not is_mark_problem_hotkey(
+        0x00, control | option, control, option, command, shift)
 
 
 def test_mark_menu_title() -> None:
     """所有编辑框确认条均归入真值不可靠，不依赖 final 文本是否为空。"""
     assert mark_item_title({'kind': 'editor_confirmed', 'final_text': '已确认'}) == '标记上一条真值不可靠  ⌃⌥M'
     assert mark_item_title({'kind': 'editor_confirmed', 'final_text': ''}) == '标记上一条真值不可靠  ⌃⌥M'
-    assert mark_item_title({'kind': 'editor_canceled', 'raw_text': '已放弃'}) == '标记上一条转录有误  ⌃⌥M'
     assert mark_item_title({'kind': 'direct', 'raw_text': '直接输出'}) == '标记上一条转录有误  ⌃⌥M'
+
+
+def test_panel_grows_downward_from_fixed_top() -> None:
+    """面板整体靠上，内容增高时上边缘不动、底边只向下移动。"""
+    screen_y, screen_h, top_ratio = 24.0, 1000.0, 0.70
+    short_h, tall_h = 62.0, 300.0
+    short_y = panel_origin_y(short_h, screen_y, screen_h, top_ratio)
+    tall_y = panel_origin_y(tall_h, screen_y, screen_h, top_ratio)
+    assert short_y + short_h == tall_y + tall_h
+    assert tall_y < short_y
+    assert short_y + short_h == screen_y + screen_h * top_ratio
 
 
 def test_self_target_guard() -> None:
@@ -72,5 +101,6 @@ def test_self_target_guard() -> None:
 if __name__ == '__main__':
     test_hotkey_and_editor_commands()
     test_mark_menu_title()
+    test_panel_grows_downward_from_fixed_top()
     test_self_target_guard()
     print('PASS: editor UI contract')

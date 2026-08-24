@@ -11,7 +11,8 @@ UI（2026-08-24 口径）：面板基本只有一个编辑框——borderless �
 底（NSVisualEffectView）；NSTextView 按宽度自动换行（自动换行与模型输出中的
 换行符不做额外标注，Word 式逻辑）；Enter=确认，Shift+Enter=手动插入换行，Tab
 吞掉防止焦点跳出；高度随内容自适应（底边锚定向上生长，上限为屏幕可视高度
-40%，超出后在同一编辑框内滚动）。
+40%，超出后在同一编辑框内滚动；面板水平居中、整体靠上，上边缘固定，内容
+增加时向下伸展、减少时从下边缩回）。
 
 线程模型：AppKit 面板必须在主线程创建与操作；本模块经 AppHelper.callAfter 把
 显示/激活动作派发到主线程。确认/取消回调由 result_processor 提供，内部用
@@ -52,6 +53,7 @@ _PANEL_W = 680            # 面板宽（固定，只做高度自适应）
 _MARGIN = 10              # 文本框距面板边缘
 _MIN_TEXT_H = 42          # 单行时的文本框高
 _MAX_SCREEN_RATIO = 0.4   # 面板最高占屏幕可视高度的比例
+_PANEL_TOP_RATIO = 0.70   # 面板上边缘位于可视区高度 70%，水平居中、整体靠上
 _controller = None          # EditorPanelController 单例（主线程创建）
 _active = False             # 面板是否打开（主线程读写，读侧仅作提示用途）
 _pending = False            # present_editor 已派发但 show_panel 尚未执行（跨线程窗口）
@@ -78,6 +80,17 @@ def editor_command(selector: str, *, shift_pressed: bool = False) -> Optional[st
         'insertBacktab:': 'tab',
     }
     return commands.get(selector)
+
+
+def panel_origin_y(
+    content_height: float,
+    screen_origin_y: float,
+    screen_height: float,
+    top_ratio: float = 0.70,
+) -> float:
+    """按固定上边缘计算面板底边：内容增高时只向下伸展，缩短时从下边收回。"""
+    top_y = screen_origin_y + screen_height * top_ratio
+    return max(screen_origin_y, top_y - content_height)
 
 
 def is_available() -> bool:
@@ -258,12 +271,16 @@ if _APPKIT_OK:
             self._on_cancel = on_cancel
             try:
                 self.text_view.setString_(text)
-                self._resize_panel()  # 先按内容定高，再定位
-                # 屏幕上方水平居中：底边锚定在可视区 ~55% 高度处，向上生长
+                self._resize_panel()  # 按内容定高；几何函数固定上边缘、向下伸缩
+                # 水平居中，垂直整体靠上；高度变化不再移动上边缘。
                 from AppKit import NSScreen
                 screen = NSScreen.mainScreen().visibleFrame()
                 x = screen.origin.x + (screen.size.width - _PANEL_W) / 2
-                y = screen.origin.y + screen.size.height * 0.55
+                y = panel_origin_y(
+                    self.panel.frame().size.height,
+                    screen.origin.y,
+                    screen.size.height,
+                )
                 self.panel.setFrameOrigin_(NSPoint(x, y))
                 from AppKit import NSApplication, NSApp
                 NSApp.activateIgnoringOtherApps_(True)
@@ -314,7 +331,7 @@ if _APPKIT_OK:
 
         # ---- 高度自适应（主线程）----
         def _resize_panel(self):
-            """按当前内容重算文本框高与面板高；底边锚定向上生长，越出屏幕顶则下压。"""
+            """按当前内容重算高度；固定上边缘，窗口只向下伸展或从下边缩回。"""
             try:
                 from AppKit import NSScreen
                 lm = self.text_view.layoutManager()
@@ -338,9 +355,8 @@ if _APPKIT_OK:
                     NSRect(NSPoint(_MARGIN, _MARGIN), NSSize(tv_w, visible_text_h)))
                 content_h = visible_text_h + 2 * _MARGIN
                 origin = self.panel.frame().origin
-                y = origin.y
-                if y + content_h > screen.origin.y + screen.size.height:
-                    y = screen.origin.y + screen.size.height - content_h
+                y = panel_origin_y(
+                    content_h, screen.origin.y, screen.size.height)
                 self.panel.setFrame_display_(
                     NSRect(NSPoint(origin.x, y), NSSize(_PANEL_W, content_h)), True)
             except Exception:
