@@ -136,6 +136,10 @@ class ShortcutTask:
             # 的目标。此处只记日志；随后若本轮没有面板需求，输出层仍按自身逻辑处理。
             logger.debug(f"记录上屏目标应用失败（忽略）: {e}")
 
+        # 此后打开音频流可能耗时，而期间用户可能已经在另一个应用启动下一条录音。
+        # 因此在这里冻结本轮目标，随 trace 传下去，结果返回时不再依赖全局可变值。
+        paste_target_snapshot = getattr(self.state, 'paste_target', None)
+
         # macOS 新路线要求“只在真正录音时占用麦克风”，因此在宣布开始录音前，
         # 先让音频流管理器按需打开输入流。
         # 注意：开流是耗时操作（数百毫秒），刻意放在锁外执行，这样启动期间到来的
@@ -172,6 +176,7 @@ class ShortcutTask:
             self.recording_start_time,
             trace_id=self.trace_id,
             shortcut_key=self.shortcut.key,
+            paste_target=paste_target_snapshot,
         )
 
         # 打印动画：正在录音

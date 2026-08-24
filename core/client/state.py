@@ -126,6 +126,7 @@ class ClientState:
         start_time: float,
         trace_id: Optional[str] = None,
         shortcut_key: Optional[str] = None,
+        paste_target: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         开始录音
@@ -134,6 +135,7 @@ class ClientState:
             start_time: 录音开始的时间戳
             trace_id: 本次按键驱动链路的追踪标识
             shortcut_key: 触发本次录音的快捷键名
+            paste_target: 本轮录音开始时捕获的上屏目标快照
         """
         self.recording = True
         self.recording_start_time = start_time
@@ -147,6 +149,9 @@ class ClientState:
             self.trace_contexts[trace_id] = {
                 'trace_id': trace_id,
                 'shortcut_key': shortcut_key,
+                # 每条在途录音必须持有自己的目标副本，不能在结果返回时再读取可能
+                # 已被下一条录音覆盖的全局 paste_target。
+                'paste_target': dict(paste_target) if paste_target else None,
                 'recording_start_time': start_time,
                 'finish_requested_time': None,
                 'cancel_requested_time': None,
@@ -366,4 +371,3 @@ class ClientState:
             text: 输出文本内容
         """
         self.last_output_text = text
-

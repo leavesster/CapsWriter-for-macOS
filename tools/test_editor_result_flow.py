@@ -120,12 +120,13 @@ def _message(task_id, text):
     )
 
 
-def _set_trace(state, task_id, duration):
-    """duration=None 模拟 trace 缺项；其余值用入口实际计算的两个时间点表达。"""
+def _set_trace(state, task_id, duration, paste_target=None):
+    """duration=None 模拟 trace 缺项；可附带本轮录音开始时捕获的上屏目标。"""
     if duration is not None:
         state.traces[task_id] = {
             'trace_id': f'trace-{task_id}', 'recording_start_time': 100.0,
             'finish_requested_time': 100.0 + duration,
+            'paste_target': paste_target,
         }
 
 
@@ -222,6 +223,32 @@ async def case_direct_registers_after_emit():
     assert events == ['emit', 'last_case'], events
     assert app.state.editor_last_case['kind'] == 'direct'
     print('  case_direct_registers_after_emit: PASS')
+
+
+async def case_paste_target_isolated_by_trace():
+    """A/B 录音并发时，A 的晚到结果必须继续使用 A 开始时捕获的目标。"""
+    from core.client.state import ClientState
+
+    target_a = {'pid': 101, 'name': '应用 A'}
+    target_b = {'pid': 202, 'name': '应用 B'}
+    state = ClientState()
+    state.start_recording(10.0, trace_id='trace-a', paste_target=target_a)
+    state.bind_task_trace('task-a', 'trace-a')
+    state.start_recording(20.0, trace_id='trace-b', paste_target=target_b)
+    state.bind_task_trace('task-b', 'trace-b')
+    assert state.pop_trace_context_by_task_id('task-a')['paste_target'] == target_a
+    assert state.pop_trace_context_by_task_id('task-b')['paste_target'] == target_b
+
+    processor, app = await _new_processor()
+    app.state.paste_target = target_b
+    _set_trace(app.state, 'late-a', 2.5, paste_target=target_a)
+    processor._emit_text.return_value = True
+    with patch.multiple(Config, editor_mode=False, llm_enabled=False, save_audio=False,
+                        hot=False), \
+            patch('core.client.output.result_processor.get_active_window_info', return_value={}):
+        await processor._handle_message(_message('late-a', '来自 A'))
+    assert app.state.editor_last_case['source_app'] == target_a
+    print('  case_paste_target_isolated_by_trace: PASS')
 
 
 async def case_direct_empty_after_processing_keeps_last():
@@ -354,6 +381,7 @@ async def main():
     await case_invalid_empty_keeps_last()
     await case_unknown_empty_enters_editor()
     await case_direct_registers_after_emit()
+    await case_paste_target_isolated_by_trace()
     await case_direct_empty_after_processing_keeps_last()
     await case_paste_copy_failure_does_not_send_paste()
     await case_macos_paste_permission_failure_keeps_copy_success()

@@ -318,6 +318,13 @@ class ResultProcessor:
             _beg = trace_context.get('recording_start_time')
             if _fin is not None and _beg is not None:
                 recording_duration = _fin - _beg
+        # 有 trace 时，即使本轮捕获结果为 None，也必须尊重该快照；只有历史消息或
+        # 无 trace 来源的结果才回退全局值，避免 A 的晚到结果误用 B 的目标。
+        source_app = (
+            trace_context.get('paste_target')
+            if trace_context is not None
+            else getattr(self.state, 'paste_target', None)
+        )
         # 必须用服务端原始转录判定，而非热词/规则处理后的 text；无效条是录音
         # 事实，不应被后处理规则偶然改写。判定函数同时被 AnnotationService 复用。
         invalid_case = is_invalid_annotation_case(original_text, recording_duration)
@@ -357,7 +364,7 @@ class ResultProcessor:
                 'time_start': message.time_start,
                 'raw_text': original_text,
                 'recording_duration': recording_duration,
-                'source_app': getattr(self.state, 'paste_target', None),
+                'source_app': source_app,
                 'audio_src': str(file_path_pending) if file_path_pending else None,
                 'mode': 'editor',
             }
@@ -431,7 +438,7 @@ class ResultProcessor:
                 'recording_duration': recording_duration,
                 # 音频此时已按最终文本重命名归档，直接指向归档路径（标记时再拷贝）
                 'audio_src': str(file_audio) if file_audio else None,
-                'source_app': getattr(self.state, 'paste_target', None),
+                'source_app': source_app,
                 'mode': 'direct', 'kind': 'direct', 'marked': False,
             }
 
@@ -491,7 +498,8 @@ class ResultProcessor:
                 case, final_text=final_text, kind='editor_confirmed', marked=False,
                 audio_src=str(file_audio) if file_audio else case.get('audio_src'))
             # 先把焦点还给用户当初说话的应用，再粘贴上屏（编辑框刚才抢占过前台焦点）
-            activate_app_sync(getattr(self.state, 'paste_target', None))
+            # case 已冻结本条录音开始时的目标；确认发生得更晚，不能再读全局值。
+            activate_app_sync(case.get('source_app'))
             await self._emit_text(final_text, paste=True)
         except Exception as e:
             logger.error(f"[editor] 确认回调处理失败: {e}", exc_info=True)
