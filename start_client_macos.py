@@ -409,7 +409,8 @@ def _build_status_menu():
     copy_item = _add("复制最近结果", 'copyRecentResult:', symbol='doc.on.clipboard')
     # ---- 编辑框标注功能两项（2026-08-23）：开关 + 标记入口，均常驻不禁用 ----
     menu.addItem_(NSMenuItem.separatorItem())
-    _menu_editor_item = _add('编辑框模式', 'toggleEditorMode:', symbol='square.and.pencil')
+    # 编辑框模式用“文本光标”表达输入面板开关，与下方“编辑热词”的铅笔图标区分。
+    _menu_editor_item = _add('编辑框模式', 'toggleEditorMode:', symbol='character.cursor.ibeam')
     _menu_mark_item = _add(_mark_item_title(), 'markLastProblem:', symbol='exclamationmark.triangle')
     _add("编辑热词", 'editHotwords:', symbol='square.and.pencil')
 
