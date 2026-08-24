@@ -210,6 +210,7 @@ async def case_direct_registers_after_emit():
 
     async def _emit(text, paste=None):
         events.append('emit')
+        return True
 
     processor._emit_text.side_effect = _emit
     _set_trace(app.state, 'direct', 2.5)
@@ -243,6 +244,70 @@ async def case_direct_empty_after_processing_keeps_last():
     assert app.state.editor_last_case is old_case, '未写剪贴板的空结果不得覆盖旧 editor_last_case'
     assert app.state.events == [], app.state.events
     print('  case_direct_empty_after_processing_keeps_last: PASS')
+
+
+async def case_paste_copy_failure_does_not_send_paste():
+    """剪贴板写入失败时不得继续发送 Cmd+V，且输出结果必须明确失败。"""
+    from core.client.clipboard import clipboard
+
+    with patch('core.client.clipboard.clipboard.platform.system', return_value='Darwin'), \
+            patch('core.client.clipboard.clipboard.safe_copy', return_value=False) as safe_copy, \
+            patch('core.client.clipboard.clipboard.subprocess.run') as run:
+        copied = await clipboard.paste_text('复制失败', restore_clipboard=False)
+
+    assert copied is False
+    safe_copy.assert_called_once_with('复制失败')
+    run.assert_not_called()
+    print('  case_paste_copy_failure_does_not_send_paste: PASS')
+
+
+async def case_macos_paste_permission_failure_keeps_copy_success():
+    """macOS 无辅助功能权限时，文本已入剪贴板仍视为输出成功。"""
+    from core.client.clipboard import clipboard
+
+    failed_paste = type('_Result', (), {'returncode': 1, 'stderr': b'not allowed'})()
+    with patch('core.client.clipboard.clipboard.platform.system', return_value='Darwin'), \
+            patch('core.client.clipboard.clipboard.safe_copy', return_value=True), \
+            patch('core.client.clipboard.clipboard.subprocess.run', return_value=failed_paste):
+        copied = await clipboard.paste_text('可手动粘贴', restore_clipboard=False)
+
+    assert copied is True
+    print('  case_macos_paste_permission_failure_keeps_copy_success: PASS')
+
+
+async def case_emit_failure_skips_state_and_udp():
+    """输出层失败时，不得把未写入剪贴板的文本伪装成已输出。"""
+    processor, app = await _new_processor()
+    app.output = type('_FakeOutput', (), {'output': AsyncMock(return_value=False)})()
+
+    with patch('core.client.output.result_processor.broadcast_output_udp') as broadcast:
+        # _new_processor 为其余结果流用例替换了实例方法；此处显式调用类实现，
+        # 才能验证真实的成功状态闸门。
+        emitted = await type(processor)._emit_text(processor, '未成功输出', paste=True)
+
+    assert emitted is False
+    assert app.state.output_texts == []
+    broadcast.assert_not_called()
+    print('  case_emit_failure_skips_state_and_udp: PASS')
+
+
+async def case_direct_emit_failure_keeps_last():
+    """direct 输出失败时，不能覆盖用户仍可标记的旧上一条。"""
+    processor, app = await _new_processor()
+    old_case = {'task_id': 'old-failed-direct', 'kind': 'direct', 'marked': False}
+    app.state.editor_last_case = old_case
+    app.state.events.clear()
+    processor._emit_text.return_value = False
+    _set_trace(app.state, 'direct-failed', 2.5)
+
+    with patch.multiple(Config, editor_mode=False, llm_enabled=False, save_audio=False,
+                        hot=False), \
+            patch('core.client.output.result_processor.get_active_window_info', return_value={}):
+        await processor._handle_message(_message('direct-failed', '输出失败'))
+
+    assert app.state.editor_last_case is old_case
+    assert app.state.events == []
+    print('  case_direct_emit_failure_keeps_last: PASS')
 
 
 async def case_editor_confirmed_order():
@@ -290,6 +355,10 @@ async def main():
     await case_unknown_empty_enters_editor()
     await case_direct_registers_after_emit()
     await case_direct_empty_after_processing_keeps_last()
+    await case_paste_copy_failure_does_not_send_paste()
+    await case_macos_paste_permission_failure_keeps_copy_success()
+    await case_emit_failure_skips_state_and_udp()
+    await case_direct_emit_failure_keeps_last()
     await case_editor_confirmed_order()
     await case_editor_canceled_clipboard_only()
     print('editor 结果流全部断言通过 ✅')

@@ -388,6 +388,7 @@ class ResultProcessor:
 
         # LLM 处理和输出
         llm_result = None
+        emit_succeeded = False
         if Config.llm_enabled:
             llm_result = await self.app.llm.process_and_output(
                 text,
@@ -395,7 +396,7 @@ class ResultProcessor:
                 matched_hotwords=potential_hotwords  # 传递上下文热词给 LLM
             )
         else:
-            await self._emit_text(text, paste=paste)
+            emit_succeeded = await self._emit_text(text, paste=paste)
 
         # 保存录音与写入 md 文件（直接输出路径；编辑框路径在回调里做同样的事）
         file_audio = self._save_audio_and_diary(text, message.time_start, file_path_pending)
@@ -415,11 +416,11 @@ class ResultProcessor:
         # （编辑框路径进入分支后已 return，不会走到这里；LLM 路径有自己的管线，
         # 不登记；无效条不登记--「上一条」保持为最新一条合法条。）
         # 边界口径：非编辑框模式下，能算「上一条」的分界线是写入剪贴板
-        # （_emit_text 已完成，此处紧随其后）。
+        # （_emit_text 已成功完成，此处紧随其后）。
         # TextOutput.output 对空文本会直接返回，既不写剪贴板也不上屏；因此后处理
         # （去末尾标点/规则替换）得到空串时，不能越过“写入剪贴板后才算上一条”的
         # 直接输出边界，更不能用空结果覆盖用户仍可标记的旧案例。
-        if not Config.llm_enabled and not invalid_case and text:
+        if not Config.llm_enabled and not invalid_case and text and emit_succeeded:
             import datetime as _dt0
             self.state.editor_last_case = {
                 'ts': _dt0.datetime.now().isoformat(timespec='seconds'),
@@ -439,11 +440,15 @@ class ResultProcessor:
 
         console.line()
 
-    async def _emit_text(self, text: str, paste: Optional[bool] = None) -> None:
+    async def _emit_text(self, text: str, paste: Optional[bool] = None) -> bool:
         """统一输出出口（直接输出与编辑框确认两路共用）：上屏 + 记录输出文本 + UDP 广播。"""
-        await self.output.output(text, paste=paste)
+        # output 只在文本已写入剪贴板（或打字成功）时返回 True；失败结果不得进入
+        # 状态面板或 UDP，避免其他消费者把未实际输出的文本当作成功结果。
+        if not await self.output.output(text, paste=paste):
+            return False
         self.state.set_output_text(text)
         broadcast_output_udp(text)
+        return True
 
     def _save_audio_and_diary(
         self, text: str, time_start: float, file_path_pending

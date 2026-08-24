@@ -158,13 +158,17 @@ def save_and_restore_clipboard():
             logger.debug("剪贴板已恢复")
 
 
-async def paste_text(text: str, restore_clipboard: bool = True):
+async def paste_text(text: str, restore_clipboard: bool = True) -> bool:
     """
     通过模拟 Ctrl+V 粘贴文本
 
     Args:
         text: 要粘贴的文本
         restore_clipboard: 粘贴后是否恢复原剪贴板内容
+
+    Returns:
+        文本是否已成功写入剪贴板。macOS 的 Cmd+V 注入可能因辅助功能权限失败，
+        但此时用户仍可手动粘贴，因此只要复制成功就返回 True。
     """
     # 保存剪切板
     original: Optional[str] = None
@@ -175,7 +179,11 @@ async def paste_text(text: str, restore_clipboard: bool = True):
             logger.warning(f"读取原始剪贴板失败，跳过恢复流程: {e}")
 
     # 复制要粘贴的文本
-    safe_copy(text)
+    # “输出成功”的语义边界是目标文本已进入剪贴板。写入失败时绝不能继续发送
+    # Cmd+V，否则会把用户原有剪贴板内容误粘贴到前台应用。
+    if not safe_copy(text):
+        logger.warning("识别文本写入剪贴板失败，已跳过自动粘贴")
+        return False
     logger.debug(f"已复制文本到剪贴板，长度: {len(text)}")
 
     # macOS 下 pbcopy 是子进程，给一点时间让剪贴板内容落定
@@ -215,3 +223,5 @@ async def paste_text(text: str, restore_clipboard: bool = True):
         await asyncio.sleep(0.1)
         if safe_copy(original):
             logger.debug("剪贴板已恢复")
+
+    return True
