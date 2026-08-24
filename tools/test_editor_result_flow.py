@@ -12,7 +12,7 @@ import asyncio
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 # 保证从任意 cwd 执行时都导入本项目，而不是环境中同名包。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -214,13 +214,14 @@ async def case_direct_registers_after_emit():
         return True
 
     processor._emit_text.side_effect = _emit
+    processor._save_audio_and_diary = lambda *args: events.append('io')
     _set_trace(app.state, 'direct', 2.5)
     with patch.multiple(Config, editor_mode=False, llm_enabled=False, save_audio=False,
                         hot=False), \
             patch('core.client.output.result_processor.get_active_window_info', return_value={}):
         await processor._handle_message(_message('direct', '直接输出'))
 
-    assert events == ['emit', 'last_case'], events
+    assert events == ['emit', 'last_case', 'io'], events
     assert app.state.editor_last_case['kind'] == 'direct'
     print('  case_direct_registers_after_emit: PASS')
 
@@ -338,7 +339,7 @@ async def case_direct_emit_failure_keeps_last():
 
 
 async def case_editor_confirmed_order():
-    """Enter：先 corrected 落盘，再登记，再恢复焦点，最后强制 paste 上屏。"""
+    """Enter：先发布上一条，再落 corrected、恢复焦点并强制 paste 上屏。"""
     processor, app = await _new_processor()
     events = app.state.events
 
@@ -354,9 +355,82 @@ async def case_editor_confirmed_order():
 
     assert app.annotation.records[0][0]['status'] == 'corrected'
     assert app.annotation.records[0][0]['kind'] == 'editor_confirmed'
-    assert events == ['record', 'last_case', 'activate', ('emit', '修正后', True)], events
+    assert events == ['last_case', 'record', 'activate', ('emit', '修正后', True)], events
     assert app.state.editor_last_case['kind'] == 'editor_confirmed'
     print('  case_editor_confirmed_order: PASS')
+
+
+async def case_editor_callbacks_publish_before_dispatch():
+    """Enter/Esc 的同步回调必须先发布上一条，再把慢 I/O 协程派发出去。"""
+    for action, expected_kind in (('confirm', 'editor_confirmed'),
+                                  ('cancel', 'editor_canceled')):
+        processor, app = await _new_processor()
+        held_coroutines = []
+
+        def _hold(coro, _loop):
+            held_coroutines.append(coro)
+            return object()
+
+        def _present(_text, on_confirm, on_cancel):
+            if action == 'confirm':
+                on_confirm('修正后')
+            else:
+                on_cancel('放弃文本')
+            assert app.state.editor_last_case['kind'] == expected_kind
+            assert held_coroutines, '发布上一条后才应派发异步 I/O'
+            return True
+
+        try:
+            with patch.multiple(Config, editor_mode=True, llm_enabled=False,
+                                save_audio=False, hot=False), \
+                    patch('core.client.output.result_processor.sys.platform', 'darwin'), \
+                    patch('core.client.output.edit_panel.present_editor', side_effect=_present), \
+                    patch('core.client.output.result_processor.asyncio.run_coroutine_threadsafe',
+                          side_effect=_hold):
+                await processor._handle_message(_message(f'callback-{action}', '原文'))
+        finally:
+            # 测试刻意不执行慢协程；显式关闭，避免未 await 警告干扰结果。
+            for coro in held_coroutines:
+                coro.close()
+
+    print('  case_editor_callbacks_publish_before_dispatch: PASS')
+
+
+async def case_editor_io_failures_do_not_block_output():
+    """归档或标注失败不能撤回上一条，也不能阻断 Enter 上屏与 Esc 写剪贴板。"""
+    processor, app = await _new_processor()
+    processor._save_audio_and_diary = Mock(side_effect=OSError('归档失败'))
+    app.annotation.record = Mock(side_effect=RuntimeError('标注失败'))
+    processor._emit_text.return_value = True
+    confirmed = {'task_id': 'confirm-io', 'raw_text': '原文', 'time_start': 10.0,
+                 'mode': 'editor', 'source_app': {'pid': 101}}
+    with patch('core.client.output.edit_panel.activate_app_sync'):
+        await processor._editor_confirmed(confirmed, '仍需上屏', None)
+    processor._emit_text.assert_awaited_once_with('仍需上屏', paste=True)
+    assert app.state.editor_last_case['task_id'] == 'confirm-io'
+
+    processor, app = await _new_processor()
+    processor._save_audio_and_diary = Mock(side_effect=OSError('日记失败'))
+    canceled = {'task_id': 'cancel-io', 'raw_text': '原文', 'time_start': 10.0,
+                'mode': 'editor'}
+    with patch('core.client.clipboard.clipboard.safe_copy', return_value=True) as safe_copy:
+        await processor._editor_canceled(canceled, None, '仍需复制')
+    safe_copy.assert_called_once_with('仍需复制')
+    assert app.state.editor_last_case['task_id'] == 'cancel-io'
+    print('  case_editor_io_failures_do_not_block_output: PASS')
+
+
+async def case_audio_backfill_keeps_newer_last_case():
+    """A 的慢归档晚于 B 发布完成时，只能放弃回填，不能覆盖 B。"""
+    processor, app = await _new_processor()
+    newer = {'task_id': 'task-b', 'kind': 'direct', 'marked': False,
+             'audio_src': 'b.wav'}
+    app.state.editor_last_case = newer
+    app.state.events.clear()
+    processor._backfill_last_case_audio('task-a', Path('/tmp/a.wav'))
+    assert app.state.editor_last_case is newer
+    assert app.state.events == []
+    print('  case_audio_backfill_keeps_newer_last_case: PASS')
 
 
 async def case_editor_canceled_clipboard_only():
@@ -388,6 +462,9 @@ async def main():
     await case_emit_failure_skips_state_and_udp()
     await case_direct_emit_failure_keeps_last()
     await case_editor_confirmed_order()
+    await case_editor_callbacks_publish_before_dispatch()
+    await case_editor_io_failures_do_not_block_output()
+    await case_audio_backfill_keeps_newer_last_case()
     await case_editor_canceled_clipboard_only()
     print('editor 结果流全部断言通过 ✅')
 

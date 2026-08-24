@@ -372,12 +372,17 @@ class ResultProcessor:
             # 只有 Enter/Esc 把面板关闭后才在回调里登记（kind 区分两种关闭方式）。
 
             def _on_confirm(final_text: str):
-                # 回调在主线程（AppKit）执行：把真正的工作派发回客户端事件循环
+                # 面板关闭就是用户边界：先同步发布“上一条”，再派发可能包含磁盘 I/O
+                # 的协程，确保用户紧接着触发标记时不会仍指向更早的案例。
+                self._publish_editor_last_case(
+                    case_common, final_text=final_text, kind='editor_confirmed')
                 asyncio.run_coroutine_threadsafe(
                     self._editor_confirmed(dict(case_common), final_text, file_path_pending),
                     self.app.loop)
 
             def _on_cancel(panel_text: str):
+                self._publish_editor_last_case(
+                    case_common, final_text=None, kind='editor_canceled')
                 asyncio.run_coroutine_threadsafe(
                     self._editor_canceled(dict(case_common), file_path_pending, panel_text),
                     self.app.loop)
@@ -405,8 +410,35 @@ class ResultProcessor:
         else:
             emit_succeeded = await self._emit_text(text, paste=paste)
 
-        # 保存录音与写入 md 文件（直接输出路径；编辑框路径在回调里做同样的事）
-        file_audio = self._save_audio_and_diary(text, message.time_start, file_path_pending)
+        # direct 的用户边界是输出成功：必须先发布 provisional case，再做磁盘 I/O，
+        # 否则归档较慢或失败时，“标记上一条”会误标更早的结果。
+        register_direct = (
+            not Config.llm_enabled and not invalid_case and bool(text) and emit_succeeded
+        )
+        if register_direct:
+            import datetime as _dt0
+            self.state.editor_last_case = {
+                'ts': _dt0.datetime.now().isoformat(timespec='seconds'),
+                'task_id': message.task_id,
+                'time_start': message.time_start,
+                'raw_text': original_text,
+                'final_text': text,
+                'recording_duration': recording_duration,
+                'audio_src': str(file_path_pending) if file_path_pending else None,
+                'source_app': source_app,
+                'mode': 'direct', 'kind': 'direct', 'marked': False,
+            }
+
+        # 保存录音与写入 md 文件（直接输出路径；编辑框路径在回调里做同样的事）。
+        # 方法内部已分项容错；外围仍保留保护，兼容测试替身或未来实现异常。
+        try:
+            file_audio = self._save_audio_and_diary(
+                text, message.time_start, file_path_pending)
+        except Exception as e:
+            logger.error(f"[editor] 直接输出归档失败（不影响上一条）: {e}", exc_info=True)
+            file_audio = None
+        if register_direct and file_audio:
+            self._backfill_last_case_audio(message.task_id, file_audio)
 
         # LLM 结果显示和保存
         if Config.llm_enabled and llm_result and llm_result.processed:
@@ -427,20 +459,7 @@ class ResultProcessor:
         # TextOutput.output 对空文本会直接返回，既不写剪贴板也不上屏；因此后处理
         # （去末尾标点/规则替换）得到空串时，不能越过“写入剪贴板后才算上一条”的
         # 直接输出边界，更不能用空结果覆盖用户仍可标记的旧案例。
-        if not Config.llm_enabled and not invalid_case and text and emit_succeeded:
-            import datetime as _dt0
-            self.state.editor_last_case = {
-                'ts': _dt0.datetime.now().isoformat(timespec='seconds'),
-                'task_id': message.task_id,
-                'time_start': message.time_start,
-                'raw_text': original_text,
-                'final_text': text,
-                'recording_duration': recording_duration,
-                # 音频此时已按最终文本重命名归档，直接指向归档路径（标记时再拷贝）
-                'audio_src': str(file_audio) if file_audio else None,
-                'source_app': source_app,
-                'mode': 'direct', 'kind': 'direct', 'marked': False,
-            }
+        # 实际登记已提前到输出成功后；这里不再重复写入，避免覆盖期间发生的标记。
 
         # 检测修饰键状态（调试用）
         self._log_modifier_key_state()
@@ -469,40 +488,72 @@ class ResultProcessor:
         file_audio = None
         if Config.save_audio:
             if file_path_pending:
-                file_manager = AudioFileManager()
-                file_manager.file_path = Path(file_path_pending)
-                file_audio = file_manager.rename(text, time_start)
-            self.diary.write(text, time_start, file_audio)
+                try:
+                    file_manager = AudioFileManager()
+                    file_manager.file_path = Path(file_path_pending)
+                    file_audio = file_manager.rename(text, time_start)
+                except Exception as e:
+                    # 音频改名失败不应阻止日记，更不能撤回已发布的上一条。
+                    logger.error(f"[editor] 音频归档失败: {e}", exc_info=True)
+            try:
+                self.diary.write(text, time_start, file_audio)
+            except Exception as e:
+                # 日记是旁路记录；失败只记日志，不改变输出和标注交互语义。
+                logger.error(f"[editor] 日记写入失败: {e}", exc_info=True)
         return file_audio
 
+    def _publish_editor_last_case(self, case: dict, final_text: Optional[str], kind: str) -> None:
+        """在面板关闭的同步边界幂等发布上一条，慢 I/O 不参与可见性判定。"""
+        current = getattr(self.state, 'editor_last_case', None)
+        if (current and current.get('task_id') == case.get('task_id')
+                and current.get('kind') == kind):
+            return
+        self.state.editor_last_case = dict(
+            case, final_text=final_text, kind=kind, marked=False,
+            audio_src=case.get('audio_src'))
+
+    def _backfill_last_case_audio(self, task_id: str, file_audio: Path) -> None:
+        """仅给仍处于“上一条”的同一任务回填归档音频，绝不覆盖更新案例。"""
+        current = getattr(self.state, 'editor_last_case', None)
+        if not current or current.get('task_id') != task_id:
+            return
+        self.state.editor_last_case = dict(current, audio_src=str(file_audio))
+
     async def _editor_confirmed(self, case: dict, final_text: str, file_path_pending) -> None:
-        """编辑框 Enter 确认：改名/日记 -> 存标注(corrected) -> 登记上一条(kind=已确认)
-        -> 恢复目标应用 -> 上屏。"""
+        """编辑框 Enter 确认：立即发布上一条，再分项执行归档、标注、恢复与上屏。"""
         from core.client.output.edit_panel import activate_app_sync
         # message 在回调里不可得，time_start 随 case 传入；缺失时退回当前时间
         time_start = case.get('time_start') or time.time()
+        self._publish_editor_last_case(
+            case, final_text=final_text, kind='editor_confirmed')
+        file_audio = None
         try:
             file_audio = self._save_audio_and_diary(final_text, time_start, file_path_pending)
-            # 标注音频优先用重命名后的归档路径；改名失败时退回待处理临时路径（文件还在原处）
-            audio_src = file_audio
-            if audio_src is None and case.get('audio_src'):
-                audio_src = Path(case['audio_src'])
+        except Exception as e:
+            logger.error(f"[editor] 确认后归档失败（继续标注与上屏）: {e}", exc_info=True)
+        if file_audio:
+            self._backfill_last_case_audio(case.get('task_id'), file_audio)
+        # 标注音频优先用重命名后的归档路径；改名失败时退回待处理临时路径。
+        audio_src = file_audio
+        if audio_src is None and case.get('audio_src'):
+            audio_src = Path(case['audio_src'])
+        try:
             self.app.annotation.record(
                 dict(case, status='corrected', final_text=final_text,
                      kind='editor_confirmed'),
                 audio_src=audio_src,
             )
-            # 面板已被 Enter 关闭：此刻起本条才算「上一条」（kind=editor_confirmed，
-            # 标记它 = 标记「真值不可靠」）
-            self.state.editor_last_case = dict(
-                case, final_text=final_text, kind='editor_confirmed', marked=False,
-                audio_src=str(file_audio) if file_audio else case.get('audio_src'))
-            # 先把焦点还给用户当初说话的应用，再粘贴上屏（编辑框刚才抢占过前台焦点）
-            # case 已冻结本条录音开始时的目标；确认发生得更晚，不能再读全局值。
+        except Exception as e:
+            logger.error(f"[editor] corrected 标注写入失败（继续上屏）: {e}", exc_info=True)
+        # 先把焦点还给用户当初说话的应用，再粘贴上屏；二者也分别容错。
+        try:
             activate_app_sync(case.get('source_app'))
+        except Exception as e:
+            logger.error(f"[editor] 恢复目标应用失败（继续上屏）: {e}", exc_info=True)
+        try:
             await self._emit_text(final_text, paste=True)
         except Exception as e:
-            logger.error(f"[editor] 确认回调处理失败: {e}", exc_info=True)
+            logger.error(f"[editor] 确认文本输出失败: {e}", exc_info=True)
 
     async def _editor_canceled(self, case: dict, file_path_pending, panel_text: str) -> None:
         """编辑框 Esc 放弃（2026-08-24 口径）：
@@ -514,21 +565,26 @@ class ResultProcessor:
           标记它 = 标记「转录有误」）
         """
         time_start = case.get('time_start') or time.time()
+        self._publish_editor_last_case(
+            case, final_text=None, kind='editor_canceled')
+        text = (panel_text or '').strip()
+        file_audio = None
         try:
-            text = (panel_text or '').strip()
             file_audio = self._save_audio_and_diary(
                 text or (case.get('raw_text') or ''), time_start, file_path_pending)
+        except Exception as e:
+            logger.error(f"[editor] 放弃后归档失败（继续写剪贴板）: {e}", exc_info=True)
+        if file_audio:
+            self._backfill_last_case_audio(case.get('task_id'), file_audio)
+        try:
             if text:
                 from core.client.clipboard.clipboard import safe_copy
                 if safe_copy(text):
                     self.state.set_output_text(text)
                     logger.info(f"[editor] 已放弃上屏，转录已写入剪贴板 task={case.get('task_id')}")
-            self.state.editor_last_case = dict(
-                case, final_text=None, kind='editor_canceled', marked=False,
-                audio_src=str(file_audio) if file_audio else case.get('audio_src'))
             logger.info(f"[editor] 用户放弃本条（不入标注库）task={case.get('task_id')}")
         except Exception as e:
-            logger.error(f"[editor] 放弃回调处理失败: {e}", exc_info=True)
+            logger.error(f"[editor] 放弃后写入剪贴板失败: {e}", exc_info=True)
 
     def _cleanup(self) -> None:
         """清理资源"""
