@@ -65,10 +65,9 @@ class AnnotationService:
         self.root = Path(app.base_dir) / 'evals' / 'manual_cases' / 'v2'
         self.audio_dir = self.root / 'audio'
         self.jsonl_path = self.root / 'cases.jsonl'
-        self._lock = threading.Lock()
-        # record() 最近一次写入是否成功；mark_last_problem 据此决定是否置去重标记，
-        # 写失败时不置位，用户可重试「标记上一条」。锁内写、锁外读（容忍良态竞态）。
-        self._last_write_ok = True
+        # mark_last_problem 需要在锁内调用同样加锁的 record，因此必须用可重入锁；
+        # 它同时保证“检查未标记 → 写盘 → 置 marked”是一个不可穿透的事务。
+        self._lock = threading.RLock()
 
     def record(self, case: Dict[str, Any], audio_src: Optional[Path] = None) -> Dict[str, Any]:
         """规范化并追加一条案例；audio_src 存在时拷贝进 audio/。
@@ -83,7 +82,7 @@ class AnnotationService:
             logger.info(
                 f"[annotation] 无效案例（过短/为空）不入库 task={case.get('task_id')} "
                 f"dur={case.get('recording_duration')}")
-            return {'skipped': True, 'reason': 'invalid_case'}
+            return {'skipped': True, 'reason': 'invalid_case', 'write_ok': False}
         entry: Dict[str, Any] = {
             # 固定由当前服务声明格式版本，避免任意调用方误标或伪造历史版本。
             'annotation_version': ANNOTATION_VERSION,
@@ -112,13 +111,13 @@ class AnnotationService:
                 self.root.mkdir(parents=True, exist_ok=True)
                 with self.jsonl_path.open('a', encoding='utf-8') as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-                self._last_write_ok = True
         except Exception as e:
-            self._last_write_ok = False
             logger.error(f"[annotation] 标注落盘失败（不影响正常输出流程）: {e}")
-            return entry
+            # write_ok 只属于本次调用，不能放在实例共享字段里被其他线程覆盖；
+            # 该控制字段仅出现在返回值中，前面写入 JSONL 的 entry 不包含它。
+            return dict(entry, write_ok=False)
         logger.info(f"[annotation] 已记录案例 status={entry['status']} task={entry['task_id']}")
-        return entry
+        return dict(entry, write_ok=True)
 
     def mark_last_problem(self) -> Dict[str, Any]:
         """「标记上一条」入口（菜单项 / ⌃⌥M 热键共用）。
@@ -130,63 +129,68 @@ class AnnotationService:
           追加 raw_unreliable 记录（raw-only）
         通知带内容摘录（有 final 用 final，无则 raw），让用户确认标记对象。
         """
-        st = getattr(self.app, 'state', None)
-        case = getattr(st, 'editor_last_case', None) if st is not None else None
-        if not case:
-            logger.info('[annotation] 没有可标记的上一条案例')
-            return {'ok': False, 'reason': 'no_case'}
-        if case.get('marked'):
-            return {'ok': False, 'reason': 'already_marked'}
+        with self._lock:
+            st = getattr(self.app, 'state', None)
+            case = getattr(st, 'editor_last_case', None) if st is not None else None
+            if not case:
+                logger.info('[annotation] 没有可标记的上一条案例')
+                return {'ok': False, 'reason': 'no_case'}
+            if case.get('marked'):
+                return {'ok': False, 'reason': 'already_marked'}
 
-        kind = case.get('kind', 'direct')
-        # Enter 已关闭编辑框就确定为 editor_confirmed；用户可以主动清空文本后确认，
-        # 此时 final_text 为空也不能改变其“真值不可靠”的标记语义。通知摘录仍在
-        # 下方按空 final 回退 raw，但 status 的判断绝不能依赖文本是否为真值。
-        if kind == 'editor_confirmed':
-            status = 'final_unreliable'
-            final_text = case.get('final_text')
-            notify_msg = '已标记上一条真值不可靠'
-        else:
-            status = 'raw_unreliable'
-            final_text = None
-            notify_msg = '已标记上一条转录有误'
+            kind = case.get('kind', 'direct')
+            # Enter 已关闭编辑框就确定为 editor_confirmed；用户可以主动清空文本后确认，
+            # 此时 final_text 为空也不能改变其“真值不可靠”的标记语义。
+            if kind == 'editor_confirmed':
+                status = 'final_unreliable'
+                final_text = case.get('final_text')
+                notify_msg = '已标记上一条真值不可靠'
+            else:
+                status = 'raw_unreliable'
+                final_text = None
+                notify_msg = '已标记上一条转录有误'
 
-        # 标记入口也显式复用唯一判定函数：即使上游误把无效条登记为上一条，
-        # 也不能借由手动标记绕过标注域过滤。
-        if is_invalid_annotation_case(
-            case.get('raw_text'), case.get('recording_duration')
-        ):
-            return {'ok': False, 'reason': 'invalid_case'}
+            # 标记入口也显式复用唯一判定函数：即使上游误把无效条登记为上一条，
+            # 也不能借由手动标记绕过标注域过滤。
+            if is_invalid_annotation_case(
+                case.get('raw_text'), case.get('recording_duration')
+            ):
+                return {'ok': False, 'reason': 'invalid_case'}
 
-        res = self.record(
-            {
-                'ts': case.get('ts'),
-                'task_id': case.get('task_id'),
-                'status': status,
-                'raw_text': case.get('raw_text'),
-                'final_text': final_text,
-                'recording_duration': case.get('recording_duration'),
-                'source_app': case.get('source_app'),
-                'mode': case.get('mode', 'direct'),
-                'kind': kind,
-            },
-            audio_src=Path(case['audio_src']) if case.get('audio_src') else None,
-        )
-        if res.get('skipped'):
-            return {'ok': False, 'reason': 'invalid_case'}
-        if not self._last_write_ok:
-            # 落盘失败：不置去重标记，允许用户重试，保证标记不丢
-            return {'ok': False, 'reason': 'write_failed'}
-        case['marked'] = True  # 原地置位实现去重（dict 由 state 持有）
-        # 通知带内容摘录：有 final 用 final，无则 raw（约 20 字 + …）
-        snippet = ((final_text or case.get('raw_text') or '')).strip()
-        if snippet:
-            snippet = snippet[:_SNIPPET_LEN] + ('…' if len(snippet) > _SNIPPET_LEN else '')
-            notify_msg = f'{notify_msg}：{snippet}'
+            res = self.record(
+                {
+                    'ts': case.get('ts'),
+                    'task_id': case.get('task_id'),
+                    'status': status,
+                    'raw_text': case.get('raw_text'),
+                    'final_text': final_text,
+                    'recording_duration': case.get('recording_duration'),
+                    'source_app': case.get('source_app'),
+                    'mode': case.get('mode', 'direct'),
+                    'kind': kind,
+                },
+                audio_src=Path(case['audio_src']) if case.get('audio_src') else None,
+            )
+            if res.get('skipped'):
+                return {'ok': False, 'reason': 'invalid_case'}
+            if not res.get('write_ok'):
+                # 落盘失败：不置去重标记，允许用户重试，保证标记不丢。
+                return {'ok': False, 'reason': 'write_failed'}
+            case['marked'] = True  # 与检查和落盘处于同一事务，第二线程只能看到 True。
+
+            # 通知带内容摘录：有 final 用 final，无则 raw（约 20 字 + …）。通知在
+            # 事务结束后投递，避免系统 API 的延迟无谓占用写入锁。
+            snippet = ((final_text or case.get('raw_text') or '')).strip()
+            if snippet:
+                snippet = snippet[:_SNIPPET_LEN] + ('…' if len(snippet) > _SNIPPET_LEN else '')
+                notify_msg = f'{notify_msg}：{snippet}'
+            identity = case.get('task_id') or case.get('ts') or id(case)
+            notify_key = f'mark_last_problem_{identity}'
+
         eb = getattr(self.app, 'error_bus', None)
         if eb is not None:
             try:
-                eb.notify(notify_msg, 'mark_last_problem')
+                eb.notify(notify_msg, notify_key)
             except Exception as e:
                 logger.error(f"[annotation] 标记成功但通知发送失败: {e}")
         return {'ok': True}

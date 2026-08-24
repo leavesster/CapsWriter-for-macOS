@@ -13,6 +13,8 @@
    无案例拒绝 / 重复标记去重 / 通知带内容摘录；
 6. record 落盘异常（root 不可写）不上抛，mark_last_problem 返回 write_failed
    且不置去重标记（可重试）。
+7. 两个线程并发标记同一案例时，check→record→marked 事务只成功一次；
+8. 真实 ErrorBus 在 30 秒窗口内不会聚合两个不同任务的成功通知。
 
 测试通过假 app.base_dir 把 root 定位到临时目录，绝不写真实 evals/manual_cases。
 用法：项目根目录下 `.venv/bin/python tools/test_editor_annotation.py`
@@ -24,6 +26,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 # 保证从任意 cwd 运行都能导入项目包
@@ -151,6 +154,8 @@ def case_record_and_copy(tmp: Path):
     assert len(lines) == 2, f'应有两行 JSONL，实际 {len(lines)}'
     assert json.loads(lines[0])['final_text'] == '纠正后'
     assert json.loads(lines[1])['status'] == 'raw_unreliable'
+    assert 'write_ok' not in json.loads(lines[0]), '调用控制字段不得污染 JSONL 格式'
+    assert e1['write_ok'] is True and e2['write_ok'] is True
     # JSONL 中文不转义（ensure_ascii=False）
     assert '原始' in lines[0]
     assert e1['audio_file'] and (svc.root / e1['audio_file']).exists(), '音频应被拷贝'
@@ -326,10 +331,82 @@ def case_record_error_swallowed(tmp: Path):
     print('  case_record_error_swallowed: PASS')
 
 
+def case_concurrent_mark_is_single_transaction(tmp: Path):
+    """两个线程同时标记同一案例时，只允许一次 record 与一次成功返回。"""
+    svc, app = _make_svc(tmp)
+    app.state.editor_last_case = {
+        'ts': '2026-08-24T20:00:00', 'task_id': 'same-task',
+        'raw_text': '同一条并发标记', 'recording_duration': 4.0,
+        'mode': 'direct', 'kind': 'direct', 'marked': False,
+    }
+    original_record = svc.record
+    first_inside = threading.Event()
+    second_inside = threading.Event()
+    release_first = threading.Event()
+    calls_lock = threading.Lock()
+    record_calls = 0
+
+    def _slow_record(case, audio_src=None):
+        nonlocal record_calls
+        with calls_lock:
+            record_calls += 1
+            call_no = record_calls
+        if call_no == 1:
+            first_inside.set()
+            assert release_first.wait(2.0), '测试未及时释放首个写入'
+        else:
+            second_inside.set()
+        return original_record(case, audio_src=audio_src)
+
+    svc.record = _slow_record
+    results = []
+    first = threading.Thread(target=lambda: results.append(svc.mark_last_problem()))
+    second = threading.Thread(target=lambda: results.append(svc.mark_last_problem()))
+    first.start()
+    assert first_inside.wait(2.0), '首线程未进入 record'
+    second.start()
+    # 旧实现会让第二线程同时进入 record；事务实现会把它挡在外层 RLock。
+    second_inside.wait(0.2)
+    release_first.set()
+    first.join(2.0)
+    second.join(2.0)
+    assert not first.is_alive() and not second.is_alive(), '并发标记不应死锁'
+    assert record_calls == 1, f'同一案例只应写一次，实际 record_calls={record_calls}'
+    assert sum(result.get('ok') is True for result in results) == 1, results
+    assert sum(result.get('reason') == 'already_marked' for result in results) == 1, results
+    lines = svc.jsonl_path.read_text(encoding='utf-8').strip().splitlines()
+    assert len(lines) == 1, f'并发标记只允许一行，实际 {len(lines)}'
+    print('  case_concurrent_mark_is_single_transaction: PASS')
+
+
+def case_real_error_bus_delivers_distinct_tasks(tmp: Path):
+    """真实 ErrorBus 的 30 秒去重不能吞掉两个不同任务的标记通知。"""
+    from core.client.error_bus import ErrorBus
+
+    svc, app = _make_svc(tmp)
+    delivered = []
+    bus = ErrorBus.__new__(ErrorBus)
+    bus._lock = threading.Lock()
+    bus._notif_last = {}
+    bus._deliver = delivered.append
+    app.error_bus = bus
+
+    for task_id in ('notify-a', 'notify-b'):
+        app.state.editor_last_case = {
+            'ts': f'2026-08-24T20:00:0{len(delivered)}', 'task_id': task_id,
+            'raw_text': task_id, 'recording_duration': 4.0,
+            'mode': 'direct', 'kind': 'direct', 'marked': False,
+        }
+        assert svc.mark_last_problem()['ok'] is True
+
+    assert len(delivered) == 2, f'不同 task 的通知都应投递，实际 {delivered}'
+    print('  case_real_error_bus_delivers_distinct_tasks: PASS')
+
+
 def main():
     tmp = Path(tempfile.mkdtemp())
     try:
-        for sub in ('s1', 's2', 's3', 's4', 's5'):
+        for sub in ('s1', 's2', 's3', 's4', 's5', 's6', 's7'):
             (tmp / sub).mkdir()
         print('annotation_store 标注落盘测试：')
         case_v2_physical_isolation(tmp / 's1')
@@ -338,6 +415,8 @@ def main():
         case_invalid_filtered(tmp / 's4')
         case_mark_last_problem(tmp / 's5')
         case_record_error_swallowed(tmp)
+        case_concurrent_mark_is_single_transaction(tmp / 's6')
+        case_real_error_bus_delivers_distinct_tasks(tmp / 's7')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('annotation_store 全部断言通过 ✅')
