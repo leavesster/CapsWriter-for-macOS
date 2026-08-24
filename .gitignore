@@ -222,6 +222,10 @@ models/**/*.cfg
 # 评测运行产物与个人标注数据（含用户录音与口述文本，绝不入库）
 evals/manual_cases/audio/
 evals/manual_cases/cases.jsonl
+# v2 标注同样包含个人 raw/final 文本；单独列出，避免新物理目录绕过旧规则。
+evals/manual_cases/v2/cases.jsonl
+# v2 录音可能使用任意音频格式，忽略整个目录而非依赖全局扩展名。
+evals/manual_cases/v2/audio/
 
 # 例外：随代码入库的回归测试脚本
 tools/test_*.py

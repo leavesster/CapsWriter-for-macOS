@@ -2,7 +2,8 @@
 """AnnotationService 标注落盘隔离测试（2026-08-23 创建，2026-08-24 语义重定义）。
 
 场景：
-1. v2 物理隔离：新版路径、固定版本字段和音频相对路径；伪造旧 v1 文件逐字节不变；
+1. v2 物理隔离：新版路径、固定版本字段和音频相对路径；伪造旧 v1 JSONL、
+   音频哨兵的文件清单与字节逐项不变；
 2. record 正常写 JSONL + 拷贝音频到 audio/；
 3. record audio_src=None 不崩、audio_file 为 null；
 4. 无效案例过滤（时长 <0.5s / 已知时长 <2s 且空文本）不入库；
@@ -73,12 +74,20 @@ def case_v2_physical_isolation(tmp: Path):
     fresh_svc.record({'task_id': 'fresh-v2', 'raw_text': '新数据', 'recording_duration': 3.0})
     assert not (fresh_base / 'evals' / 'manual_cases' / 'cases.jsonl').exists()
 
-    # 再单独伪造旧 v1 文件，验证写 v2 后旧文件仍逐字节不变。
+    # 再单独伪造旧 v1 JSONL 与 audio 哨兵，验证写 v2 后旧资产逐字节不变。
     legacy_base = tmp / 'legacy'
     old_jsonl = legacy_base / 'evals' / 'manual_cases' / 'cases.jsonl'
     old_jsonl.parent.mkdir(parents=True)
     old_bytes = b'{"legacy":"v1 bytes must remain unchanged"}\n'
     old_jsonl.write_bytes(old_bytes)
+    old_audio_dir = old_jsonl.parent / 'audio'
+    old_audio_dir.mkdir()
+    old_audio_sentinel = old_audio_dir / 'legacy-sentinel.flac'
+    old_audio_sentinel.write_bytes(b'legacy-audio-bytes-must-remain-unchanged')
+    # 快照同时覆盖文件名与内容，证明新版既不改写也不在旧目录新增音频。
+    old_audio_snapshot = {
+        path.name: path.read_bytes() for path in old_audio_dir.iterdir()
+    }
 
     svc, _ = _make_svc(legacy_base)
     src = legacy_base / 'fake.mp3'
@@ -88,6 +97,8 @@ def case_v2_physical_isolation(tmp: Path):
             'ts': '2026-08-24T12:00:00',
             'task_id': 'v2-case',
             'status': 'corrected',
+            # 调用方即使伪造旧版本，服务端也必须强制写当前 v2 格式。
+            'annotation_version': 1,
             'raw_text': '新版原始文本',
             'final_text': '新版确认文本',
             'recording_duration': 3.0,
@@ -99,6 +110,9 @@ def case_v2_physical_isolation(tmp: Path):
     assert entry['annotation_version'] == 2
     assert entry['audio_file'] and entry['audio_file'].startswith('audio/')
     assert old_jsonl.read_bytes() == old_bytes, '旧 v1 JSONL 必须逐字节保持不变'
+    assert {path.name: path.read_bytes() for path in old_audio_dir.iterdir()} == \
+        old_audio_snapshot, '旧 v1 audio 文件清单与哨兵字节必须完全不变'
+    assert (svc.root / entry['audio_file']).is_file(), '新版音频必须只写入 v2/audio'
     print('  case_v2_physical_isolation: PASS')
 
 
