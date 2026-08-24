@@ -52,12 +52,13 @@ class ClientConfig:
     paste_apps   = ['WeiXin.exe', 'Telegram.exe']  # 匹配时强制粘贴
 
     # ===== 编辑框标注模式（macOS，2026-08-23）=====
-    # True：识别结果先进原生编辑框，用户编辑确认（Enter）后先存标注再上屏；
-    # Esc 取消上屏但按「有问题、未纠正」留存标注。False：维持旧行为直接上屏。
+    # True：识别结果先进原生编辑框，Enter 确认后先存标注再上屏；
+    # Esc=放弃：不入标注库，非空转录仍写剪贴板但不自动上屏。False：维持旧行为直接上屏。
     # 菜单栏「编辑框模式」项运行时切换并持久化到 ~/.capswriter/state/editor-mode.json
     editor_mode = True
-    # 「标记上一条识别有问题」的全局热键（pynput 格式；仅 macOS 注册）
-    mark_problem_hotkey = '<alt>+m'
+    # 「标记上一条」的全局热键（pynput 格式；仅 macOS 注册）。
+    # 2026-08-24：⌥M 会与系统特殊字符输入冲突（打出 μ 等希腊字母），改 ⌃⌥M
+    mark_problem_hotkey = '<ctrl>+<alt>+m'
 
     save_audio = True           # 是否保存录音文件
     audio_name_len = 20         # 将录音识别结果的前多少个字存储到录音文件名中，建议不要超过200

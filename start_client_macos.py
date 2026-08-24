@@ -170,6 +170,7 @@ _menu_controller = None
 _menu_header_item = None
 _menu_copy_item = None
 _menu_editor_item = None   # 「编辑框模式」开关项（勾选态随 menuNeedsUpdate 刷新）
+_menu_mark_item = None     # 「标记上一条」项（标题随上一条 kind 动态切换）
 
 
 def _format_status_title() -> str:
@@ -217,6 +218,33 @@ def _recent_text() -> str | None:
     return getattr(st, 'last_output_text', None) or getattr(st, 'last_recognition_text', None)
 
 
+def mark_item_title(editor_last_case: dict | None) -> str:
+    """按最近案例生成「标记上一条」菜单标题（2026-08-24 口径）。
+
+    - 上一条是编辑框 Enter 确认条（kind=editor_confirmed，有 final）：
+      标记的是「真值不可靠」--用户采集的 final 不可采信
+    - 其余（编辑框 Esc 放弃条 / 非编辑框条）：标记的是「转录有误」
+
+    这是不读取客户端状态的纯函数，供离线测试固定菜单文案；实时状态读取留在
+    `_mark_item_title`，保证菜单每次展开仍以当下的 editor_last_case 为准。
+    """
+    title = '标记上一条转录有误  ⌃⌥M'
+    if (editor_last_case
+            and editor_last_case.get('kind') == 'editor_confirmed'
+            and editor_last_case.get('final_text')):
+        title = '标记上一条真值不可靠  ⌃⌥M'
+    return title
+
+
+def _mark_item_title() -> str:
+    """读取实时 editor_last_case，并委托纯函数生成当前菜单标题。"""
+    with _client_lock:
+        c = _client
+    st = getattr(c, 'state', None) if c is not None else None
+    case = getattr(st, 'editor_last_case', None) if st is not None else None
+    return mark_item_title(case)
+
+
 def _sf_symbol_image(name: str):
     """加载一个 SF Symbol 模板图（macOS 11+）；不可用时返回 None。
 
@@ -253,6 +281,12 @@ class _StatusMenuController(NSObject):
                     else NSControlStateValueOff)
             except Exception as e:
                 _menubar_dbg(f"refresh editor-mode state FAILED: {e!r}")
+        # 「标记上一条」标题：随上一条 kind 切换（真值不可靠 / 转录有误）
+        if _menu_mark_item is not None:
+            try:
+                _menu_mark_item.setTitle_(_mark_item_title())
+            except Exception as e:
+                _menubar_dbg(f"refresh mark-item title FAILED: {e!r}")
 
     # ---- 动作：复制最近结果到剪贴板 ----
     def copyRecentResult_(self, sender):
@@ -287,7 +321,7 @@ class _StatusMenuController(NSObject):
             _menubar_dbg(f"persist editor_mode FAILED: {e!r}")
             print(f"[CapsWriter.app] 持久化编辑框模式失败: {e}", file=sys.stderr)
 
-    # ---- 动作：标记上一条识别有问题（与 ⌥M 热键同一入口）----
+    # ---- 动作：标记上一条（与 ⌃⌥M 热键同一入口；语义按上一条 kind 分流）----
     # mark_last_problem 内部自带锁与异常兜底，主线程直调安全；
     # 无最近案例时它自行返回 {'ok': False, 'reason': 'no_case'}。
     def markLastProblem_(self, sender):
@@ -344,7 +378,7 @@ def _build_status_menu():
     """构建原生 NSMenu 并挂上各项。返回 NSMenu。"""
     from AppKit import NSMenu, NSMenuItem
 
-    global _menu_controller, _menu_header_item, _menu_copy_item, _menu_editor_item
+    global _menu_controller, _menu_header_item, _menu_copy_item, _menu_editor_item, _menu_mark_item
 
     menu = NSMenu.alloc().init()
     # 关闭自动启停：自行管理各项可用态（表头禁用、复制项按有无结果动态置灰）
@@ -372,7 +406,7 @@ def _build_status_menu():
     # ---- 编辑框标注功能两项（2026-08-23）：开关 + 标记入口，均常驻不禁用 ----
     menu.addItem_(NSMenuItem.separatorItem())
     _menu_editor_item = _add('编辑框模式', 'toggleEditorMode:', symbol='square.and.pencil')
-    _add('标记上一条有问题  ⌥M', 'markLastProblem:', symbol='exclamationmark.triangle')
+    _menu_mark_item = _add(_mark_item_title(), 'markLastProblem:', symbol='exclamationmark.triangle')
     _add("编辑热词", 'editHotwords:', symbol='square.and.pencil')
 
     menu.addItem_(NSMenuItem.separatorItem())

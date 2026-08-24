@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import asyncio
+import os
 import platform
 import time
 from threading import Event, Lock
@@ -14,12 +15,27 @@ from typing import TYPE_CHECKING, Optional
 
 from . import logger
 from core.tools.my_status import Status
- 
+
 if TYPE_CHECKING:
     from core.client.shortcut.shortcut_config import Shortcut
     from core.client.state import ClientState
     from core.client.audio.recorder import AudioRecorder
     from core.client.app import CapsWriterClient
+
+
+def _is_self_target(target: Optional[dict]) -> bool:
+    """判断捕获到的前台应用是否为 CapsWriter 客户端自身（自捕获误判守卫）。
+
+    只识别本客户端的 PID、已知 bundle id 与展示名，不能用模糊子串匹配；否则名称
+    恰好包含 “CapsWriter” 的普通应用也会被误拦截，导致用户真实的上屏目标丢失。
+    """
+    if not target:
+        return False
+    bundle = (target.get('bundle_id') or '').casefold()
+    name = (target.get('name') or '').casefold()
+    return (target.get('pid') == os.getpid()
+            or bundle in {'com.capswriter.client', 'com.capswriter'}
+            or name in {'capswriter', 'capswriter for macos'})
 
 
 
@@ -100,15 +116,25 @@ class ShortcutTask:
 
         # 编辑框模式需要知道「用户此刻在哪说话」：在开流前的最早时刻记录前台应用，
         # 作为识别完成后恢复焦点并上屏的目标。非 macOS / 面板模块不可用时置 None。
+        # Guard（2026-08-24）：面板刚关闭等时机会捕获到 CapsWriter 自身，此时
+        # 不覆盖 paste_target--保留上一个有效目标（无则维持原值），避免误指向自己。
         try:
             if platform.system() == 'Darwin':
                 from core.client.output.edit_panel import capture_frontmost_app
-                self.state.paste_target = capture_frontmost_app()
+                target = capture_frontmost_app()
+                if target is not None and _is_self_target(target):
+                    logger.debug("[editor] 前台为 CapsWriter 自身，保留上一次上屏目标")
+                elif target is not None:
+                    self.state.paste_target = target
+                else:
+                    # 捕获失败同样保留旧目标（比清空更接近用户真实所在的应用）
+                    logger.debug("[editor] 捕获前台应用失败，保留上一次上屏目标")
             else:
                 self.state.paste_target = None
         except Exception as e:
+            # 捕获 API 本身异常与返回 None 的语义相同：均不能破坏上一条已验证有效
+            # 的目标。此处只记日志；随后若本轮没有面板需求，输出层仍按自身逻辑处理。
             logger.debug(f"记录上屏目标应用失败（忽略）: {e}")
-            self.state.paste_target = None
 
         # macOS 新路线要求“只在真正录音时占用麦克风”，因此在宣布开始录音前，
         # 先让音频流管理器按需打开输入流。
