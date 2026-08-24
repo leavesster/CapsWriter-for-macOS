@@ -305,6 +305,8 @@
 
   重启前在会话中明确告知用户 CapsWriter 会短暂不可用；使用真实菜单栏、Caps 长按、编辑面板、系统剪贴板和目标应用逐项验收。任何失败都回到 Task 1 或 Task 2 修复并重新完整验收。
 
+  进度：客户端已真实重启并确认新 PID；用户已接管并通过 Enter 标记、Esc 后标记、direct 标记及 ⌃⌥M 核心路径。Shift+Enter、长文本滚动/固定顶部伸缩等其余路径仍待执行，因此本步骤保持未完成。
+
 - [ ] **Step 4: 回写结果并提交**
 
   `CLAUDE.md` 只写动态状态、裁定与验收结论；`readme.md` 仅在稳定入口变化时更新。提交前检查 `git diff --check` 和 `git status --short`，不得混入 `evals/manual_cases` 个人数据。
