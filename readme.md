@@ -67,9 +67,11 @@ bash install.sh
 | 1.7B-8bit（默认） | `mlx-community/Qwen3-ASR-1.7B-8bit` | ~1.8 GB | 日常使用 |
 | 1.7B-4bit（轻量） | `mlx-community/Qwen3-ASR-1.7B-4bit` | ~1.0 GB | 低内存 / 重度离电 |
 
-> **状态说明**：macOS 的 `qwen_asr_mlx` 目前固定使用公开的
-> `mlx-qwen3-asr v0.3.5`（commit `f069a0f`），通过稳定的 `Session.transcribe()`
-> API 识别。该后端仍处于精度调优阶段；原版 Windows `qwen_asr`（GGUF）为稳定基线。
+> **状态说明**：macOS 的 `qwen_asr_mlx` 由独立仓库
+> [`leavesster/mlx-qwen3-asr`](https://github.com/leavesster/mlx-qwen3-asr)
+> 提供，当前固定到 commit `2f11e07`（基于公开 `v0.3.5` / `f069a0f`）。
+> CapsWriter 使用稳定的 `Session.transcribe()` API；独立仓库另提供 OpenAI 兼容
+> `/v1/audio/transcriptions` 服务，可供其它语音客户端复用。
 
 ```bash
 uv pip install --python .venv/bin/python huggingface_hub

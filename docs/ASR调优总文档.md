@@ -2,8 +2,9 @@
 
 > [!IMPORTANT]
 > **Fork 基线更新（2026-09-07）**：上游文档所述 `QwenASRRunner` 对应提交
-> `25551b0d` 未公开推送，当前代码已回退到可复现的 `mlx-qwen3-asr v0.3.5`
->（commit `f069a0f`）与 `Session.transcribe()` / `WorkPipeline` 路线。下文 Runner、
+> `25551b0d` 未公开推送，当前子模块改由 `leavesster/mlx-qwen3-asr` 独立维护并
+> 固定到 commit `2f11e07`（基于公开 `v0.3.5` / `f069a0f`），CapsWriter 采用
+> `Session.transcribe()` / `WorkPipeline` 路线。下文 Runner、
 > `AudioFeedPatch`、启动预热与 wired memory 内容是历史设计记录，不代表当前已实现能力。
 
 ## 文档目的

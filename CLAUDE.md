@@ -4,7 +4,7 @@
 
 - 维护仓库：`leavesster/CapsWriter-for-macOS`。
 - 上游 `main` 原先锁定的 `mlx-qwen3-asr` 提交 `25551b0d` 未公开推送，无法克隆，且其中声明的 `QwenASRRunner`、`CapsWriterRunnerConfig`、`AudioFeedPatch` API 不存在于公开版本。
-- 当前可复现基线固定到公开 `mlx-qwen3-asr v0.3.5`（commit `f069a0f`），服务端统一走 `WorkPipeline`，MLX 引擎恢复使用已完成本机真实转写验证的 `Session.transcribe()` API。
+- 当前子模块由 `leavesster/mlx-qwen3-asr` 独立维护，固定到 commit `2f11e07`；它基于公开 `v0.3.5`（commit `f069a0f`），并提供已完成真实验证的 OpenAI 兼容服务。CapsWriter 内部仍统一走 `WorkPipeline` 和稳定的 `Session.transcribe()` API。
 - 2026-07-06 Runner、流式音频 patch、启动预热和 wired memory 相关记录保留为历史设计资料，不再表示当前代码已经具备这些能力；后续若重新引入，必须先在我们可访问的子仓库中实现、测试并固定提交。
 
 ---
