@@ -30,7 +30,7 @@
 ### 第一步：克隆仓库
 
 ```bash
-git clone --recurse-submodules https://github.com/EdgarZhong/CapsWriter-for-macOS.git
+git clone --recurse-submodules https://github.com/leavesster/CapsWriter-for-macOS.git
 cd CapsWriter-for-macOS
 ```
 
@@ -67,7 +67,9 @@ bash install.sh
 | 1.7B-8bit（默认） | `mlx-community/Qwen3-ASR-1.7B-8bit` | ~1.8 GB | 日常使用 |
 | 1.7B-4bit（轻量） | `mlx-community/Qwen3-ASR-1.7B-4bit` | ~1.0 GB | 低内存 / 重度离电 |
 
-> **状态说明**：macOS 的 `qwen_asr_mlx`（MLX 后端，经 `mlx-qwen3-asr` 子仓库 Runner 流式喂音频）目前为**实验性**后端，仍在精度调优中；原版 Windows `qwen_asr`（GGUF）为稳定基线。遇到识别质量异常欢迎提 issue 反馈。
+> **状态说明**：macOS 的 `qwen_asr_mlx` 目前固定使用公开的
+> `mlx-qwen3-asr v0.3.5`（commit `f069a0f`），通过稳定的 `Session.transcribe()`
+> API 识别。该后端仍处于精度调优阶段；原版 Windows `qwen_asr`（GGUF）为稳定基线。
 
 ```bash
 uv pip install --python .venv/bin/python huggingface_hub
@@ -239,7 +241,7 @@ capswriter restart
 | 项目 | 原版（Windows） | 本 fork（macOS） |
 |------|----------------|-----------------|
 | 语音模型 | Paraformer / SenseVoice | Qwen3-ASR（MLX 量化） |
-| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过本地 `mlx-qwen3-asr` 子仓库 Runner 统一管理 Qwen3-ASR 推理配置，并默认启用启动预热与 MLX wired memory 常驻额度 |
+| 推理后端 | ONNX（sherpa-onnx） | Apple MLX；`qwen_asr_mlx` 通过固定到 `v0.3.5` 的本地子仓库与公开 `Session.transcribe()` API 运行 |
 | 快捷键 | Windows 钩子 | CGEventTap + hidutil remap |
 | 进程管理 | 手动启动 | launchd（client + server 独立托管） |
 | 自启动 | 任务计划程序 | launchd plist |

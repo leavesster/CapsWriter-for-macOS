@@ -191,12 +191,15 @@ class Qwen3ASRMLXArgs:
     # 这样可以在不破坏启动稳健性的前提下，优先使用用户已经准备好的 8bit 权重。
     model = ModelPaths.resolve_qwen3_asr_mlx_model()
 
-    # MLX 运行态开关只表达 server 的资源管理意图；具体预热音频、active memory
-    # 观测、wired limit 计算和 mlx.core.set_wired_limit 调用都在本地
-    # mlx-qwen3-asr package 的 QwenASRRunner 内完成，避免 server 外层复制 MLX 策略。
-    enable_startup_prewarm = True
-    enable_wired_memory = True
-    wired_memory_limit = 'auto'
+    # 公开的 mlx-qwen3-asr v0.3.5 通过 Session API 提供最终结果识别。
+    # 时间戳会触发额外的 forced aligner 流程，当前先保持关闭以稳定基础听写链路。
+    return_timestamps = False
+
+    # 让上游按音频长度自动推导生成长度，避免固定上限截断较长口述。
+    max_new_tokens = None
+
+    # 日常常驻模式不输出上游逐步推理日志，需要排障时可临时开启。
+    verbose = False
 
 
 class ForceAlignerGGUFArgs:

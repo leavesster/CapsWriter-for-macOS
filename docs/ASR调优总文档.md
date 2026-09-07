@@ -1,5 +1,11 @@
 # ASR 调优总文档
 
+> [!IMPORTANT]
+> **Fork 基线更新（2026-09-07）**：上游文档所述 `QwenASRRunner` 对应提交
+> `25551b0d` 未公开推送，当前代码已回退到可复现的 `mlx-qwen3-asr v0.3.5`
+>（commit `f069a0f`）与 `Session.transcribe()` / `WorkPipeline` 路线。下文 Runner、
+> `AudioFeedPatch`、启动预热与 wired memory 内容是历史设计记录，不代表当前已实现能力。
+
 ## 文档目的
 
 本文档记录 CapsWriter for macOS 当前阶段的 ASR 调优总口径、第一轮评测数据集组合方案，以及首要需要解决的问题。

@@ -82,13 +82,9 @@ class WorkHandler:
         self.recognizer = recognizer
         self.punc_model = punc_model
         self.aligner = aligner
-        if getattr(recognizer, 'uses_task_runner', False):
-            # qwen_asr_mlx 的语义切分和拼接已经迁入 package Runner；
-            # Worker 这里只做音频增量转发和 final 结果格式化。
-            from .qwen_mlx_runner_pipeline import QwenMLXRunnerPipeline
-            self.pipeline = QwenMLXRunnerPipeline(recognizer, punc_model, aligner, self.state)
-        else:
-            self.pipeline = WorkPipeline(recognizer, punc_model, aligner, self.state)
+        # 所有后端统一走 WorkPipeline。公开的 MLX v0.3.5 只提供 Session API，
+        # 因此不能依赖上游仓库中未公开的 task runner 扩展。
+        self.pipeline = WorkPipeline(recognizer, punc_model, aligner, self.state)
 
     def drain_queue(self) -> bool:
         """Drain 队列中所有工作单元到缓冲区。Returns: False = 退出信号。"""
@@ -122,14 +118,6 @@ class WorkHandler:
 
     def cleanup(self):
         """清理断连 socket 的缓冲工作单元和 session。"""
-        stale_task_ids = [
-            tid for tid, session in list(self.state.sessions.items())
-            if session.result.socket_id not in self.sockets_id
-        ]
-        if stale_task_ids and self.pipeline and hasattr(self.pipeline, 'cleanup_tasks'):
-            # Runner 内部也持有按 task_id 聚合的音频缓冲；session 清理时必须同步释放，
-            # 否则客户端断连会把未 final 的长音频留在 worker 进程内。
-            self.pipeline.cleanup_tasks(stale_task_ids)
         self.state.cleanup_sessions(self.sockets_id)
         self.buffer.cleanup_works()
 

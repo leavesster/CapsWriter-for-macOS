@@ -1,4 +1,3 @@
 [submodule "mlx-qwen3-asr"]
 	path = mlx-qwen3-asr
-	url = git@github.com:EdgarZhong/mlx-qwen3-asr.git
-	branch = capswriter-macos
+	url = https://github.com/EdgarZhong/mlx-qwen3-asr.git

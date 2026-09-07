@@ -3,22 +3,19 @@
 Qwen3-ASR MLX 适配器
 
 设计目标：
-1. 复用 CapsWriter 现有 BaseASREngine 抽象，继续与其它后端并存。
-2. qwen_asr_mlx 主路径改为进入 package-owned Runner，由 Runner 管理完整 task_id 生命周期。
-3. 推理级参数集中到 mlx-qwen3-asr package 内，server 外层只保留模型入口和请求元信息。
+1. 复用 CapsWriter 现有 BaseASREngine 抽象，不改动上层 WorkPipeline。
+2. 首版优先跑通“松开后快速返回最终结果”的闭环，不强行接入中间流式显示。
+3. 与现有 Windows 的 qwen_asr_gguf 并存，严格把平台差异收敛在引擎层。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, List, Optional
-import sys
 
 import numpy as np
 
 from ..base import BaseASREngine, RecognitionStream, EngineCapabilities
-from .. import logger
 from ..language import get_language, ENGINE_QWEN_ASR
 
 QWEN3_ASR_SAMPLE_RATE = 16000
@@ -31,15 +28,15 @@ class ASREngineConfig:
 
     Attributes:
         model: 本地模型目录或 Hugging Face 仓库 ID。
-        enable_startup_prewarm: 是否在 server 启动时做一次真实推理预热。
-        enable_wired_memory: 是否允许 Runner 设置 MLX wired memory 常驻额度。
-        wired_memory_limit: wired memory 额度，'auto' 表示由 package 根据 active memory 估算。
+        return_timestamps: 是否向上游请求词级时间戳。
+        max_new_tokens: 可选的生成 token 上限；None 表示让上游库按音频长度自动推导。
+        verbose: 是否打印上游库的详细推理日志。
     """
 
     model: str
-    enable_startup_prewarm: bool = True
-    enable_wired_memory: bool = True
-    wired_memory_limit: str | int | None = "auto"
+    return_timestamps: bool = False
+    max_new_tokens: Optional[int] = None
+    verbose: bool = False
 
 
 class QwenASRMLXStream(RecognitionStream):
@@ -70,35 +67,23 @@ class QwenASRMLXEngine(BaseASREngine):
     """
     Qwen3-ASR MLX 推理引擎适配器
 
-    通过 `mlx_qwen3_asr.QwenASRRunner` 持有完整任务生命周期，避免 server 外层继续
-    维护 Qwen3-ASR 的语义分段、generation 参数和结果拼接策略。
+    通过 `mlx_qwen3_asr.Session` 持有模型与 tokenizer，复用其同步 `transcribe` API。
     """
-
-    uses_task_runner = True
 
     def __init__(self, config: ASREngineConfig):
         super().__init__(config)
-        self._ensure_local_package_precedence()
 
         try:
             # 延迟导入第三方依赖，避免非 macOS / 非 MLX 路线在模块导入阶段就失败。
-            import mlx_qwen3_asr
-            from mlx_qwen3_asr import CapsWriterRunnerConfig, QwenASRRunner
+            from mlx_qwen3_asr import Session
         except ImportError as exc:
             raise RuntimeError(
                 "未安装 mlx-qwen3-asr。请在 macOS 环境执行 `pip install -r requirements-server.txt`。"
             ) from exc
 
         try:
-            # Runner 会在 package 内部创建 Session 并集中持有推理参数；server 不再传 max_new_tokens 等配置。
-            runner_config = CapsWriterRunnerConfig(
-                enable_startup_prewarm=bool(self.config.enable_startup_prewarm),
-                enable_wired_memory=bool(self.config.enable_wired_memory),
-                wired_memory_limit=self.config.wired_memory_limit,
-            )
-            self.runner = QwenASRRunner(model=self.config.model, config=runner_config)
-            self.package_file = getattr(mlx_qwen3_asr, "__file__", "")
-            self._log_runner_runtime_info()
+            # Session 会在初始化阶段加载模型并持有 tokenizer，适合当前服务端常驻进程模型生命周期。
+            self.session = Session(model=self.config.model)
         except Exception as exc:
             raise RuntimeError(
                 f"Qwen3-ASR MLX 模型加载失败: {self.config.model}"
@@ -142,18 +127,35 @@ class QwenASRMLXEngine(BaseASREngine):
         参数策略：
         - `context` 直接透传给上游，作为领域上下文提示。
         - `language` 复用现有 Qwen 语言映射，保持前后端统一语言配置口径。
-        - generation、chunking、timestamps 等推理级参数由 package Runner 默认配置集中管理。
+        - `return_timestamps` 默认走配置项，后续如需临时覆盖可以通过 kwargs 传入。
         """
         if stream.audio_data is None or stream.audio_data.size == 0:
             return
 
         mapped_lang = get_language(ENGINE_QWEN_ASR, language) if language else None
-        transcription = self.runner.transcribe_audio(
+        return_timestamps = bool(
+            kwargs.get('return_timestamps', self.config.return_timestamps)
+        )
+        max_new_tokens = kwargs.get('max_new_tokens', self.config.max_new_tokens)
+        verbose = bool(kwargs.get('verbose', self.config.verbose))
+        prepared_audio, prepared_sample_rate = self._prepare_audio_for_session(
             stream.audio_data,
-            task_id=f"legacy-stream-{id(stream)}",
-            sample_rate=stream.sample_rate,
+            stream.sample_rate,
+        )
+
+        transcription = self.session.transcribe(
+            # 这里始终把音频整理成 16kHz 后再透传给上游 Session。
+            # 设计意图：
+            # 1. Qwen3-ASR 的目标采样率就是 16kHz，本地先重采样不会改变主链路语义。
+            # 2. `mlx-qwen3-asr` 遇到非 16kHz 音频时会尝试调用 ffmpeg 重采样；
+            #    当前项目并未把 ffmpeg 设为服务端硬依赖，因此这里要主动兜底。
+            # 3. 这样可以把“环境缺少 ffmpeg”从运行时阻断，降级为引擎内部的透明处理。
+            (prepared_audio, prepared_sample_rate),
             context=context or "",
             language=mapped_lang,
+            return_timestamps=return_timestamps,
+            max_new_tokens=max_new_tokens,
+            verbose=verbose,
         )
 
         stream.result.text = (transcription.text or "").strip()
@@ -170,42 +172,6 @@ class QwenASRMLXEngine(BaseASREngine):
             stream.result.tokens = self._segments_to_tokens(segments)
             stream.result.timestamps = self._segments_to_timestamps(segments)
 
-    def feed_audio_patch(
-        self,
-        *,
-        task_id: str,
-        audio: np.ndarray,
-        sample_rate: int,
-        is_final: bool,
-        context: Optional[str] = None,
-        language: Optional[str] = None,
-        source: str = "",
-    ):
-        """
-        Runner 主路径：按同一个 task_id 持续喂入音频增量。
-
-        返回值为 None 表示该 patch 只完成缓冲；当 final patch 到达时，Runner 返回完整结果。
-        """
-        from mlx_qwen3_asr import AudioFeedPatch
-
-        mapped_lang = get_language(ENGINE_QWEN_ASR, language) if language else None
-        return self.runner.feed_audio(
-            AudioFeedPatch(
-                task_id=task_id,
-                audio=audio,
-                sample_rate=sample_rate,
-                is_final=is_final,
-                context=context or "",
-                language=mapped_lang,
-                source=source,
-            )
-        )
-
-    def cancel_task(self, task_id: str) -> None:
-        """释放 Runner 内某个 task_id 的音频缓冲，用于客户端断连清理。"""
-        if hasattr(self, "runner"):
-            self.runner.cancel_task(task_id)
-
     def update_hotwords(self, hotwords: List[str]):
         """
         MLX Session 当前没有与 CapsWriter 热词系统等价的动态注入口。
@@ -221,77 +187,8 @@ class QwenASRMLXEngine(BaseASREngine):
         `mlx_qwen3_asr.Session` 暂无显式 close 接口，因此这里采用删除持有引用 +
         尝试清理 MLX cache 的保守策略，避免服务端长期运行时积累不必要缓存。
         """
-        if getattr(self, "runner", None) is not None:
-            self.runner.cleanup()
-        self.runner = None
+        self.session = None
         self._clear_mlx_cache_safely()
-
-    def _log_runner_runtime_info(self) -> None:
-        """把 package Runner 的启动预热和 wired memory 状态写入 server 日志。"""
-        info = self.runner.runtime_info()
-        logger.info(f"Qwen3-ASR MLX package path: {self.package_file}")
-
-        prewarm = info.get("prewarm_info", {}) or {}
-        if prewarm.get("enabled") is False:
-            logger.info("Qwen Runner startup prewarm disabled")
-        elif prewarm.get("ok"):
-            logger.info(
-                "Qwen Runner startup prewarm completed: "
-                f"cost={float(prewarm.get('cost_sec', 0.0)):.3f}s, "
-                f"audio={float(prewarm.get('seconds', 0.0)):.2f}s, "
-                f"finish_reason={prewarm.get('finish_reason')}, "
-                f"truncated={prewarm.get('truncated')}"
-            )
-        else:
-            logger.warning(
-                "Qwen Runner startup prewarm failed: "
-                f"cost={float(prewarm.get('cost_sec', 0.0)):.3f}s, "
-                f"error={prewarm.get('error')}"
-            )
-
-        wired = info.get("wired_memory_info", {}) or {}
-        if wired.get("enabled") is False:
-            logger.info("Qwen Runner wired memory disabled")
-        elif wired.get("ok"):
-            logger.info(
-                "Qwen Runner wired memory enabled: "
-                f"active={self._format_bytes(int(wired.get('active_bytes', 0)))}, "
-                f"limit={self._format_bytes(int(wired.get('limit_bytes', 0)))}, "
-                f"previous={self._format_bytes(int(wired.get('previous_limit_bytes', 0)))}, "
-                f"recommended={self._format_bytes(int(wired.get('recommended_bytes', 0)))}"
-            )
-        else:
-            logger.warning(
-                "Qwen Runner wired memory unavailable: "
-                f"reason={wired.get('reason') or wired.get('error')}"
-            )
-
-    @staticmethod
-    def _format_bytes(value: int) -> str:
-        """把字节数格式化为 GiB/MiB，便于阅读 server 日志。"""
-        if value <= 0:
-            return "0B"
-        gib = 1024 ** 3
-        mib = 1024 ** 2
-        if value >= gib:
-            return f"{value / gib:.2f}GiB"
-        return f"{value / mib:.2f}MiB"
-
-    @staticmethod
-    def _ensure_local_package_precedence():
-        """
-        优先加载根目录 `mlx-qwen3-asr` 子仓库源码。
-
-        这是 P0 的导入路径保险：即使当前虚拟环境里还残留非 editable 安装副本，
-        server worker 也会先把本地子仓库放到 sys.path 前面，保证本轮 Runner 改动实际生效。
-        """
-        project_root = Path(__file__).resolve().parents[4]
-        local_package_root = project_root / "mlx-qwen3-asr"
-        if not local_package_root.exists():
-            return
-        local_path = local_package_root.as_posix()
-        if local_path not in sys.path:
-            sys.path.insert(0, local_path)
 
     @staticmethod
     def _segments_to_tokens(segments: List[dict]) -> List[str]:

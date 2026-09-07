@@ -16,22 +16,11 @@ from ..schema import Work
 from core.protocol import AudioMessage
 from core.constants import AudioFormat
 from core.tools.my_status import Status
-from config_server import ServerConfig as Config
 from .. import logger
 
 
 # 麦克风接收状态指示器
 status_mic = Status('正在接收音频', spinner='point')
-
-
-def _use_qwen_mlx_runner_path() -> bool:
-    """
-    判断当前服务端是否应启用 Qwen3-ASR Runner 喂音频路径。
-
-    只有 `qwen_asr_mlx` 走这条分叉；其它后端继续使用旧的 60 秒分段 + overlap +
-    WorkPipeline 拼接机制，避免为了 macOS MLX 调优影响 Windows / GGUF 稳定基线。
-    """
-    return Config.model_type.lower() == 'qwen_asr_mlx'
 
 
 class AudioCache:
@@ -71,9 +60,7 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
     queue_in = app.state.queue_in
 
     global status_mic
-    # 旧分段路径看 chunks，新 Runner 路径看 byte_count；两者合并判断可避免
-    # qwen_asr_mlx 文件转录时每个音频包都被误判为“首包”。
-    is_start = not bool(cache.chunks) and cache.byte_count == 0
+    is_start = not bool(cache.chunks)
     socket_id = str(websocket.id)
 
     # 从消息中获取分段参数
@@ -82,18 +69,6 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
     try:
         # base64 解码音频数据（float32, 16kHz, mono）
         data = b64decode(msg.data)
-        if _use_qwen_mlx_runner_path():
-            await _submit_qwen_mlx_runner_patch(
-                websocket=websocket,
-                msg=msg,
-                cache=cache,
-                queue_in=queue_in,
-                data=data,
-                socket_id=socket_id,
-                is_start=is_start,
-            )
-            return
-
         cache.chunks += data
         cache.byte_count += len(data)
 
@@ -164,82 +139,6 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
     except Exception as e:
         logger.error(f"音频数据处理错误，任务ID: {msg.task_id}: {e}", exc_info=True)
         raise
-
-
-async def _submit_qwen_mlx_runner_patch(
-    *,
-    websocket,
-    msg: AudioMessage,
-    cache: AudioCache,
-    queue_in,
-    data: bytes,
-    socket_id: str,
-    is_start: bool,
-) -> None:
-    """
-    qwen_asr_mlx 专用提交路径：传输包直接变成 Runner 音频增量。
-
-    这里不再使用 `seg_duration + seg_overlap * 2` 阈值，也不再把 60 秒片段当作
-    ASR 语义单元；完整任务的切分、推理和拼接统一交给 package Runner。
-    """
-    global status_mic
-
-    if not msg.is_final:
-        if msg.source == 'mic':
-            status_mic.start()
-        if msg.source == 'file' and is_start:
-            console.print('正在接收音频文件...')
-            logger.info(f"开始接收音频文件，任务ID: {msg.task_id}")
-
-        offset = cache.total_duration
-        cache.byte_count += len(data)
-        work = Work(
-            source=msg.source,
-            data=data,
-            offset=offset,
-            task_id=msg.task_id,
-            socket_id=socket_id,
-            overlap=0.0,
-            is_final=False,
-            time_start=msg.time_start,
-            time_submit=time.time(),
-            context=msg.context,
-            language=msg.language,
-        )
-        queue_in.put(work)
-        logger.debug(
-            f"提交 Qwen MLX Runner 音频增量，任务ID: {msg.task_id}, "
-            f"offset={offset:.2f}s, bytes={len(data)}"
-        )
-        return
-
-    if msg.source == 'mic':
-        status_mic.stop()
-    elif msg.source == 'file':
-        print(f'音频文件接收完毕，时长 {cache.total_duration:.2f}s')
-        logger.info(f"音频文件接收完毕，任务ID: {msg.task_id}, 时长: {cache.total_duration:.2f}s")
-
-    offset = cache.total_duration
-    cache.byte_count += len(data)
-    work = Work(
-        source=msg.source,
-        data=data,
-        offset=offset,
-        task_id=msg.task_id,
-        socket_id=socket_id,
-        overlap=0.0,
-        is_final=True,
-        time_start=msg.time_start,
-        time_submit=time.time(),
-        context=msg.context,
-        language=msg.language,
-    )
-    queue_in.put(work)
-    logger.debug(
-        f"提交 Qwen MLX Runner final，任务ID: {msg.task_id}, "
-        f"总时长={cache.total_duration:.2f}s, final_bytes={len(data)}"
-    )
-    cache.reset()
 
 
 async def ws_recv(websocket, app) -> None:
